@@ -1,59 +1,28 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
+# 环境与敏感信息
+.env
+.venv/
 venv/
 env/
 ENV/
-.venv/
 
-# 环境配置
-.env
-.env.local
-.env.*.local
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
 
-# 输出文件
+# 依赖包目录（如果是本地文件夹形式的库）
+外部库/
+
+# 输出与日志
 output/
-*.xlsx
-*.xls
-*.csv
 *.log
-logs/
+*.csv  # 如果 csv 都是运行结果，可以加上；如果是必要数据请删除这行
 
-# IDE
+# 操作系统与 IDE
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# 测试
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# 临时文件
-*.tmp
-*.bak
-*.swp
+临时文件和控制台/
