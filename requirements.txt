@@ -1,0 +1,19 @@
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# HANA连接 - 根据你的HANA环境选择合适的驱动
+# 推荐使用 sqlalchemy-hana 或 hdbcli
+sqlalchemy>=2.0.0
+# hdbcli>=3.0.0  # HANA官方Python驱动
+
+# MSSQL连接
+pymssql>=2.2.0
+
+# 数据处理
+pandas>=1.5.0
+openpyxl>=3.0.0  # Excel读写支持
+
+# 可选：日志
+# loguru>=0.7.0
+
+arrow
