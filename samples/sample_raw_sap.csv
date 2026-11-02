@@ -1,0 +1,9 @@
+﻿cpudt,company_code,year,period,voucher_no,voucher_type,account_code,direction,book_amount,original_amount,cost_center,fkber,lifnr,kunnr,text_summary,zuonr,currency
+20240301,2390,2024,03,1000000001,SA,1001000001,H,1000.0,0.0,,1000,,,Thanh toan tien hang,,VND
+20240301,2390,2024,03,1000000001,SA,2202000001,S,1000.0,0.0,,1000,,,Thanh toan tien hang,,VND
+20240302,2390,2024,03,1000000002,SA,6603030001,H,600.0,0.0,,1000,,,Chi phi san xuat,,VND
+20240302,2390,2024,03,1000000002,SA,6603030002,H,400.0,0.0,,1000,,,Chi phi san xuat,,VND
+20240302,2390,2024,03,1000000002,SA,1122000001,S,700.0,0.0,,1000,,,Chi phi san xuat,,VND
+20240302,2390,2024,03,1000000002,SA,2202000001,S,300.0,0.0,,1000,,,Chi phi san xuat,,VND
+20240303,2390,2024,03,1000000003,SA,1121000001,H,100.0,100.0,,1000,,,Thu ngoai te,,USD
+20240303,2390,2024,03,1000000003,SA,2202000080,S,100.0,100.0,,1000,,,Thu ngoai te,,USD
