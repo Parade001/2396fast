@@ -95,3 +95,24 @@ processor = DataProcessor(cfg)
 df_result = processor.run("samples/sample_raw_sap.xlsx")
 export_to_sap(df_result, "output/custom_output.result.xlsx")
 ```
+
+## 6. sap与fast映射数据新增、修改
+
+### 6.1 新增客商数据、科目数据映射
+增加config.yaml文件中对应的映射关系，增加前确保新的fast客商代码不存在即可
+### 6.2 修改客商数据、科目数据映射
+#### 6.21 修改客商数据映射
+1.判断新的客商数据是否存在，存在提醒，否则修改config.yaml文件中对应的映射关系
+2.同步更新fast数据库中所有客商数据
+3.是否保留修改日志备查，默认保留
+#### 6.22 修改科目数据映射
+1.原则是不允许操作，除非修改的是sap与fast是一对一的映射关系；
+2.如果修改的是多对多映射关系，需要确认是否需要同步更新fast数据库中所有相关科目数据
+3.是否保留修改日志备查，默认保留
+
+## 7. 实现自动登录fast网页，上传导入文件，post到总账去的自动化操作。
+1.开启chrome浏览器cdp协议及调试模式
+2.执行chrome_launcher.py脚本，通过login_handler登录fast网页
+3.输入密码和账号登录；  
+4.upload_handler自动循环上传导入文件；
+5.posting_handler批量post到总账操作。 
