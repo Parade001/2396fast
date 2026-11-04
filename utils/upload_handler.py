@@ -1,9 +1,17 @@
 import time
-
-from utils import CDPClient
 import logging
-import pyperclip
-import pyautogui as pg
+from utils import CDPClient
+
+try:
+    import pyperclip
+except Exception:
+    pyperclip = None
+
+try:
+    import pyautogui as pg
+except Exception:
+    pg = None
+
 
 class UploadHandler:
     def __init__(self, cdp_client: CDPClient):

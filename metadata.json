@@ -1,0 +1,5 @@
+{
+  "name": "SAP2FAST 跨国财务转换与对账系统 (1104全量版)",
+  "description": "SAP (中国准则 CAS) 到越南 FAST 财务系统 (越南准则 VAS) 的凭证转换、多借多贷智能拆分、月度自动对账、映射风控管理与 CDP 网页自动化系统 (1104 验收定稿版)。",
+  "requestFramePermissions": []
+}

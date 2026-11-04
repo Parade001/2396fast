@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SAP2FAST (2396fast) 终极全量修复与扩展版核心工程单文件 (100% 字节级复现验证版)
+SAP2FAST (2390 / 2396fast) 终极全量修复与扩展版核心工程单文件 (1104 全量验收闭环版)
 ================================================================================
-核心能力与 100% 复现验证清单：
+版本说明 (1104 全量闭环版)：
 1. [100% 复现 2.3 #9  FAST 模板导出 (export_to_sap)]：
    - 严格第 1~5 行留空，第 6 行从 A 列 "CTY" 开始逐行写入；
    - 每一行强制写入第 1(CTY)、2(凭证号)、3(过账日期 dd/mm/yyyy)、4(币种)、5(汇率)、
      7(FAST科目)、9(客商 lifnr+kunnr)、11/12(原币借S/贷H)、13/14(本位币借S/贷H)、
-     15(摘要 text_summary+zuonr)、43(分组号 group_id，空则写 '')，确保任何文件恒为标准 43 列！
+     15(摘要 text_summary+zuonr)、43(分组号 group_id，空则写 '')，确保任何文件恒为标准 43 列；
+   - 支持可选成本中心列输出 (cost_center_col=6/8/10) 与跨月补记日期策略 (period_end / cpudt)；
    - 严格按 split_num = 20000 且跨凭证边界 (`not safe_eq(vno, belnr)`) 切分 `*_1.result.xlsx`。
-2. [100% 复现 2.3 #10 凭证号 DB 去重 (update_voucher_no)]：
+2. [100% 复现 2.3 #10 在线凭证号 DB 去重 (update_voucher_no) + 1103 CFO 离线跨期防重 (dedup_vouchers_offline)]：
    - 在线导出时自动查询 FAST 库 c11$000000，若凭证号已存在则循环追加 _A, _B, _C 后缀；
-   - 离线模式 (--mode local) 或数据库不可达时自动降级跳过，绝不卡死。
-3. [100% 复现 2.3 #13 删 FAST 错账 (remove_fast_errors)]：
-   - 在 DataReconciler 中完整实现，事务执行 UPDATE_STT_REC 与 DELETE_STT_REC 级联清理 6 张核心表。
-4. [100% 复现 2.3 #17 按科目删库 (modify_fast_database)]：支持 `--mode delete-account --fast-code <科目>`。
-5. [100% 复现 2.3 #18 改 FAST 科目 (update_fast_account)]：开启真实事务提交，支持 `--mode update-account`。
-6. [100% 落实 CFO 1103 会议拍板]：
-   - 6051000001 固定映射为外部 51181（修正 account.yaml 第172行重复键覆盖问题）；
-   - 实现需求 6 (MappingManager: 6.1 新增映射防重、6.21 改客商同步改库、6.22 改科目多对一安全锁与审计日志)；
-   - 实现需求 7 (upload_to_fast / postToGl 网页 CDP 自动化上传与过账)。
+   - 离线模式 (--mode local) 自动扫描跨期/跨文件同名凭证号 (`company_code + year + period` 不同但 `voucher_no` 相同)，
+     自动为后续期间追加 `_A`, `_B`, `_C` 后缀，彻底解决 SAP 三维唯一键与 FAST 一维 `so_ct` 冲突！
+3. [100% 复现 2.3 #13/#17/#18 + 1104 安全闸 (--dry-run 预览 + 二次确认 + 审计日志)]：
+   - `remove_fast_errors`、`modify_fast_database`、`update_fast_account` 均支持 `dry_run=True` SQL 预览、
+     交互二次确认 (`--yes` 免确认) 与 `logs/db_maintenance_audit.log` 审计留痕。
+4. [100% 落实 CFO 1103 会议拍板与需求 6 (MappingManager)]：
+   - 物理移除 `config/account.yaml` 第 172 行重复键 `6051000001: 51182` 并保留代码层 `51181` 锁定；
+   - 新增未映射 10 位 SAP 科目主动嗅探告警 (`detect_unmapped_accounts`) 与交互式补录 (`--interactive-mapping`)；
+   - 完整实现 6.1 防重添加、6.21 改客商联动改库 (支持配置表范围 `d11,ct00,m11,dmkh` 与 `dry_run`)、
+     6.22 改科目多对一安全锁与审计日志。
+5. [100% 闭环 CFO 需求 7 (自动登录 + 循环上传 + 批量过账)]：
+   - 接通 `LoginHandler.login(fast_user, fast_password, fast_unit)` 全自动填表登录（无账密时支持优雅回退人工确认）；
+   - 修复 `CDPClient.attach_upload_file` 中 `logger` 未定义的 `NameError` 阻断性 Bug；
+   - 修复 `PostingHandler.process_posting` 中无条件打印“点击 Post TO GL 按钮失败”的误导日志 Bug。
 ================================================================================
 """
 
@@ -108,7 +114,7 @@ class AccountConfig:
 
     @classmethod
     def load(cls, yaml_path: Optional[str] = None, force_reload: bool = False) -> Dict[str, Any]:
-        if cls.config and not force_reload:
+        if cls.config and not force_reload and (yaml_path is None or yaml_path == cls.yaml_path):
             return cls.config
         if yaml_path is not None:
             cls.yaml_path = yaml_path
@@ -117,7 +123,7 @@ class AccountConfig:
                 with open(cls.yaml_path, "r", encoding="utf-8") as f:
                     content = f.read()
                     cls.config = (yaml.safe_load(content) if yaml else _fallback_yaml_load(content)) or {}
-                # CFO 明确指令：6051000001 只映射外部 51181（防止 account.yaml 第172行 51182 覆盖第144行 51181）
+                # CFO 1103 明确指令：6051000001 只映射外部 51181（YAML 重复键已物理删除，此处作双重防御锁定）
                 if "account" in cls.config and isinstance(cls.config["account"], dict):
                     if "6051000001" in cls.config["account"]:
                         cls.config["account"]["6051000001"] = "51181"
@@ -151,15 +157,21 @@ class Config:
         default_chrome = os.getenv(
             "CHROME_PATH",
             r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+            if os.name == "nt"
+            else "/ms-playwright/chrome-headless-shell-linux64/chrome-headless-shell"
         )
         return {
             "chrome_path": chrome_cfg.get("chrome_path", default_chrome),
             "remote_debugging_port": int(chrome_cfg.get("remote_debugging_port", os.getenv("CHROME_PORT", "9222"))),
             "max_retries": int(chrome_cfg.get("max_retries", 3)),
             "close_browser_on_exit": bool(chrome_cfg.get("close_browser_on_exit", True)),
-            "fast_url": chrome_cfg.get("fast_url", os.getenv("FAST_URL", "")),
+            "fast_url": chrome_cfg.get(
+                "fast_url",
+                os.getenv("FAST_URL", "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx")
+            ),
             "fast_user": chrome_cfg.get("fast_user", os.getenv("FAST_USER", "")),
             "fast_password": chrome_cfg.get("fast_password", os.getenv("FAST_PASSWORD", "")),
+            "fast_unit": chrome_cfg.get("fast_unit", os.getenv("FAST_UNIT", "CTY")),
         }
 
 
@@ -174,6 +186,12 @@ class ProcessConfig:
     usd_tolerance: float = 0.05
     special_account_pairs: Optional[List[Tuple[str, str]]] = None
     special_transforms: List[Callable[[pd.DataFrame], pd.DataFrame]] = field(default_factory=list)
+    # 1104 新增可配置增强项
+    offline_voucher_dedup: bool = True
+    warn_unmapped_accounts: bool = True
+    interactive_mapping: bool = False
+    cross_month_date_mode: str = "period_end"  # "period_end" (CFO 拍板默认) 或 "cpudt"
+    cost_center_col: Optional[int] = None      # None (默认不输出) 或指定空列 6 / 8 / 10
 
 
 class StatusConfig:
@@ -214,7 +232,7 @@ class StatusConfig:
 
 
 # ==============================================================================
-# 2. 日志与通用工具函数 (含 safe_eq, resolve_period_date, update_voucher_no)
+# 2. 日志与通用工具函数 (含 safe_eq, resolve_period_date, 在线/离线凭证号去重)
 # ==============================================================================
 def setup_logger(name: str = "SAP2FAST", level: int = logging.INFO) -> logging.Logger:
     log_dir = os.path.join(BASE_DIR, "logs")
@@ -235,6 +253,20 @@ def setup_logger(name: str = "SAP2FAST", level: int = logging.INFO) -> logging.L
     return logger
 
 
+def _write_db_maintenance_audit(action: str, detail: Dict[str, Any]) -> None:
+    """写入数据库破坏性操作/维护审计日志 (logs/db_maintenance_audit.log)"""
+    log_dir = os.path.join(BASE_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    audit_file = os.path.join(log_dir, "db_maintenance_audit.log")
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "action": action,
+        **detail,
+    }
+    with open(audit_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def safe_eq(val: Any, target: Any) -> bool:
     """安全的相等比较（100% 复现 utils/general.py 的 safe_eq，处理 pandas.NA/NaN）"""
     try:
@@ -246,8 +278,8 @@ def safe_eq(val: Any, target: Any) -> bool:
 
 
 def _clean_str_series(s: pd.Series, strip_dot_zero: bool = True) -> pd.Series:
-    """兼容 pandas 2.x / 3.x / 4.x 的字符串列安全清洗函数"""
-    res = s.astype(object).fillna("").astype(str).str.strip()
+    """兼容 pandas 2.x / 3.x / 4.x 的字符串列安全清洗函数（零 FutureWarning）"""
+    res = s.map(lambda x: "" if (x is None or pd.isna(x)) else str(x).strip()).astype(str)
     if strip_dot_zero:
         res = res.str.replace(r"\.0$", "", regex=True)
     return res.replace({"nan": "", "None": "", "<NA>": ""})
@@ -270,8 +302,13 @@ def _to_str_list(df: pd.DataFrame, col: str, strip_dot_zero: bool = True) -> Lis
     return out
 
 
-def resolve_period_date(cpudt: Any, year: Any, period: Any) -> str:
-    """解析 FAST 过账日期 (dd/mm/yyyy)，越南财年 4 月起算 (+3 偏移)"""
+def resolve_period_date(cpudt: Any, year: Any, period: Any, cross_month_mode: str = "period_end") -> str:
+    """
+    解析 FAST 过账日期 (dd/mm/yyyy)，越南财年 4 月起算 (+3 偏移)。
+    cross_month_mode:
+      - 'period_end' (CFO 1103 拍板默认): 当 cpudt 晚于所属期间自然月时，压缩记在所属期间自然月月末最后一天；
+      - 'cpudt': 当 cpudt 晚于所属期间自然月时，直接取 cpudt 当天。
+    """
     try:
         y = int(float(str(year).strip()[:4]))
         m = int(float(str(period).strip())) + 3
@@ -286,6 +323,8 @@ def resolve_period_date(cpudt: Any, year: Any, period: Any) -> str:
             return f"01/{m:02d}/{y}"
         if (cy, cm) == (y, m):
             return f"{cd}/{m:02d}/{y}"
+        if cross_month_mode == "cpudt":
+            return f"{cd}/{cm:02d}/{cy}"
         last_day = calendar.monthrange(y, m)[1]
         return f"{last_day:02d}/{m:02d}/{y}"
     except Exception:
@@ -343,17 +382,93 @@ def get_sap_begin_end_cupdt(fiscalym: str) -> Tuple[str, str]:
     return first_d.strftime("%Y%m%d"), last_d.strftime("%Y%m%d")
 
 
+def _next_suffix_label(idx: int) -> str:
+    """生成 A, B, ..., Z, AA, AB 后缀"""
+    res = ""
+    n = idx
+    while n >= 0:
+        res = chr(ord("A") + (n % 26)) + res
+        n = n // 26 - 1
+    return res
+
+
+def dedup_vouchers_offline(
+    df: pd.DataFrame,
+    seen_registry: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """
+    [1104 新增 - 落实 CFO 1103 会议纪要 §1.3 离线期间防重机制]：
+    SAP 凭证号按 (company_code, year, period, voucher_no) 三维唯一，而 FAST 仅按单字段 so_ct (voucher_no) 一维唯一。
+    在离线模式下，扫描数据表内及跨文件批次内是否存在“不同期间/公司复用同一 voucher_no”的情况：
+    若发现同一 voucher_no 出现在多个不同的 (company_code, year, period) 下，首个期间保留原号，
+    后续期间自动追加 `_A`、`_B`、`_C` 后缀（同时确保长度不超过 12 位限制）。
+    """
+    if df is None or df.empty or "voucher_no" not in df.columns:
+        return df
+
+    attrs_backup = dict(df.attrs)
+    df_out = df.copy()
+    registry = seen_registry if seen_registry is not None else {}
+
+    comp_s = _clean_str_series(df_out["company_code"]) if "company_code" in df_out.columns else pd.Series("2390", index=df_out.index)
+    yr_s = _clean_str_series(df_out["year"]) if "year" in df_out.columns else pd.Series("", index=df_out.index)
+    prd_s = _clean_str_series(df_out["period"]) if "period" in df_out.columns else pd.Series("", index=df_out.index)
+    vno_s = _clean_str_series(df_out["voucher_no"])
+
+    period_keys = comp_s + "_" + yr_s + "_" + prd_s
+    unique_pairs = pd.DataFrame({"pkey": period_keys, "vno": vno_s}).drop_duplicates()
+
+    remap: Dict[Tuple[str, str], str] = {}
+    used_vnos: Set[str] = set(registry.keys()) | set(vno_s.unique())
+    renamed_count = 0
+
+    for _, row in unique_pairs.iterrows():
+        pkey = row["pkey"]
+        vno = row["vno"]
+        if not vno:
+            continue
+        if vno not in registry:
+            registry[vno] = pkey
+            remap[(pkey, vno)] = vno
+        elif registry[vno] == pkey:
+            remap[(pkey, vno)] = vno
+        else:
+            suffix_idx = 0
+            while True:
+                sfx = f"_{_next_suffix_label(suffix_idx)}"
+                max_base_len = max(1, 12 - len(sfx))
+                candidate = f"{vno[:max_base_len]}{sfx}"
+                if candidate not in used_vnos and candidate not in registry:
+                    registry[candidate] = pkey
+                    used_vnos.add(candidate)
+                    remap[(pkey, vno)] = candidate
+                    renamed_count += 1
+                    break
+                suffix_idx += 1
+
+    if renamed_count > 0:
+        df_out["voucher_no"] = [
+            remap.get((pk, vn), vn) for pk, vn in zip(period_keys.tolist(), vno_s.tolist())
+        ]
+        setup_logger("OfflineVoucherDedup").info(
+            f"离线跨期凭证号去重完成：自动为 {renamed_count} 组跨期同名凭证追加 _A/_B 后缀"
+        )
+
+    df_out.attrs.update(attrs_backup)
+    return df_out
+
+
 def update_voucher_no(df: pd.DataFrame) -> pd.DataFrame:
     """
     [修复 2.3 #10] 100% 复现 utils/update_so_ct.py 的凭证号数据库查重与 _A/_B/_C 后缀更新逻辑：
     分批查询 FAST 全局表 c11$000000，若 voucher_no 已存在，则从字符 'A' 开始尝试 f"{v_no}_{suffix_char}"，
-    直到在 c11$000000 中不存在为止（离线无法连库时自动捕获异常并秒级返回）。
+    直到在 c11$000000 中不存在为止（离线无法连库时自动降级为离线跨期查重并秒级返回）。
     """
     if df is None or df.empty or "voucher_no" not in df.columns:
         return df
 
     logger = setup_logger("UpdateVoucherNo")
-    df_out = df.copy()
+    df_out = dedup_vouchers_offline(df.copy())
     voucher_no_list = _clean_str_series(df_out["voucher_no"]).unique().tolist()
     voucher_no_list = [v for v in voucher_no_list if v]
     if not voucher_no_list:
@@ -374,21 +489,22 @@ def update_voucher_no(df: pd.DataFrame) -> pd.DataFrame:
 
             for v_no in batch:
                 if v_no in found_set:
-                    suffix_char = "A"
+                    suffix_idx = 0
                     while True:
-                        suffix_voucher_no = f"{v_no}_{suffix_char}"
+                        sfx = _next_suffix_label(suffix_idx)
+                        suffix_voucher_no = f"{v_no}_{sfx}"
                         suffix_query = MSSQLSQL.format_query_voucher_by_no("%s")
                         suffix_result = pool.execute_query(suffix_query, (suffix_voucher_no,))
                         if suffix_result.empty:
                             df_out.loc[df_out["voucher_no"] == v_no, "voucher_no"] = suffix_voucher_no
                             renamed_count += 1
                             break
-                        suffix_char = chr(ord(suffix_char) + 1)
+                        suffix_idx += 1
 
         if renamed_count > 0:
             logger.info(f"update_voucher_no 去重完成：共为 {renamed_count} 张已存在凭证追加 _A/_B 后缀")
     except Exception as e:
-        logger.warning(f"无法连接 FAST 数据库执行 update_voucher_no 查重（离线模式自动跳过）: {e}")
+        logger.warning(f"无法连接 FAST 数据库执行在线查重（已自动执行离线跨期防重）: {e}")
 
     return df_out
 
@@ -432,7 +548,7 @@ def check_exist_voucher_no(missing_voucher_nos: List[str], calendarym: str) -> L
 
 
 # ==============================================================================
-# 3. 双格式智能解析器：支持读取「17列原始SAP表」与「图二无表头CTY模板表」
+# 3. 双格式智能解析器：支持读取「17列原始SAP表」与「43列无表头CTY模板表」
 # ==============================================================================
 REQUIRED_COLUMNS = [
     "company_code", "year", "period", "voucher_no", "currency", "voucher_type", "cpudt",
@@ -511,7 +627,7 @@ def _parse_fast_cty_template(raw_no_header_df: pd.DataFrame, source_path: str = 
 
     parsed_df = pd.DataFrame({
         "cpudt": cpudt_col,
-        "company_code": os.getenv("COMPANY_CODE", "2396"),
+        "company_code": os.getenv("COMPANY_CODE", "2390"),
         "year": yr_val,
         "period": prd_val,
         "voucher_no": vno_s,
@@ -538,7 +654,7 @@ def _parse_fast_cty_template(raw_no_header_df: pd.DataFrame, source_path: str = 
 
 
 # ==============================================================================
-# 4. 核心数据转换引擎 (DataProcessor 8 步管线)
+# 4. 核心数据转换引擎 (DataProcessor 8 步管线 + 未映射科目主动检测)
 # ==============================================================================
 def apply_special_transforms(df: pd.DataFrame, cfg: ProcessConfig) -> pd.DataFrame:
     for fn in cfg.special_transforms:
@@ -571,7 +687,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     defaults = {
-        "company_code": os.getenv("COMPANY_CODE", "2396"),
+        "company_code": os.getenv("COMPANY_CODE", "2390"),
         "year": str(datetime.now().year),
         "period": f"{datetime.now().month:02d}",
         "currency": "VND",
@@ -610,6 +726,28 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _amount_equal(a: float, b: float, tol: float = 1e-2) -> bool:
     return abs(float(a) - float(b)) <= tol
+
+
+def detect_unmapped_accounts(df: pd.DataFrame) -> List[Dict[str, str]]:
+    """
+    [1104 新增 - 落实 CFO 1103 会议纪要 §2.1 & README §3.2 未映射 10 位 SAP 科目主动筛查]：
+    检测转换后 fast_account 仍保留为 8~10 位原始 SAP 科目代码的未映射记录。
+    """
+    if df is None or df.empty or "account_code" not in df.columns or "fast_account" not in df.columns:
+        return []
+    acc_s = _clean_str_series(df["account_code"])
+    fast_s = _clean_str_series(df["fast_account"])
+    fkber_s = _clean_str_series(df["fkber"]) if "fkber" in df.columns else pd.Series("", index=df.index)
+
+    unmapped_mask = (acc_s == fast_s) & (acc_s.str.len() >= 8) & (acc_s.str.isdigit())
+    if not unmapped_mask.any():
+        return []
+
+    sub = pd.DataFrame({
+        "account_code": acc_s[unmapped_mask],
+        "fkber": fkber_s[unmapped_mask],
+    }).drop_duplicates()
+    return sub.to_dict(orient="records")
 
 
 def general_transform_accounts(df: pd.DataFrame, account_mapping: Optional[dict] = None) -> pd.DataFrame:
@@ -673,7 +811,7 @@ def special_transform(df: pd.DataFrame, account_mapping: Optional[dict] = None) 
     attrs_backup = dict(df.attrs)
     df = df.copy()
 
-    # CFO 拍板：6051000001 统一只映射外部 51181
+    # CFO 1103 拍板：6051000001 统一只映射外部 51181
     df.loc[df["account_code"] == "6051000001", "fast_account"] = "51181"
 
     if not attrs_backup.get("from_result_template", False):
@@ -1121,7 +1259,12 @@ def apply_multi_debit_credit_grouping(df: pd.DataFrame, cfg: ProcessConfig) -> p
         reindexed_frames.append(sub_res)
 
     grouped_df = pd.concat(reindexed_frames, ignore_index=True)
-    final_df = pd.concat([grouped_df, df_rest], ignore_index=True) if not df_rest.empty else grouped_df
+    if not df_rest.empty:
+        df_rest["group_id"] = pd.to_numeric(df_rest["group_id"], errors="coerce").astype("Int64")
+        df_rest["group_kind"] = df_rest["group_kind"].fillna("").astype(str)
+        final_df = pd.concat([grouped_df, df_rest], ignore_index=True)
+    else:
+        final_df = grouped_df
     final_df = final_df.drop(columns=["_composite_vkey"], errors="ignore")
     final_df.attrs.update(attrs_backup)
     return final_df
@@ -1234,9 +1377,28 @@ class DataProcessor:
         out = remove_non_sense_voucher(out)
         out = general_transform_accounts(out)
         out = special_transform(out)
+
+        unmapped = detect_unmapped_accounts(out)
+        if unmapped and cfg.warn_unmapped_accounts:
+            self.logger.warning(f"发现 {len(unmapped)} 组未映射的 10 位 SAP 科目: {unmapped}")
+            if cfg.interactive_mapping and sys.stdin and sys.stdin.isatty():
+                mgr = MappingManager()
+                for item in unmapped:
+                    sap_c = item["account_code"]
+                    fkb = item["fkber"] or None
+                    ans = input(f"请输入 SAP 科目 {sap_c} (fkber={fkb}) 对应的越南 FAST 科目 (回车跳过): ").strip()
+                    if ans:
+                        mgr.add_account_mapping(sap_c, ans, fkber=fkb)
+                        mask = (out["account_code"] == sap_c) & ((out["fkber"] == (fkb or "")) if fkb else True)
+                        out.loc[mask, "fast_account"] = ans
+                unmapped = detect_unmapped_accounts(out)
+        out.attrs["unmapped_accounts"] = unmapped
+
         if cfg.special_transforms:
             out = apply_special_transforms(out, cfg)
         out = apply_multi_debit_credit_grouping(out, cfg)
+        if cfg.offline_voucher_dedup:
+            out = dedup_vouchers_offline(out)
         out = apply_vnd_zero_original(out, cfg)
         usd_res = check_usd_balance(out, cfg)
         if not usd_res.ok:
@@ -1250,7 +1412,9 @@ class DataProcessor:
             "fast_account", "ex", "group_id"
         ]
         extra_cols = [c for c in out.columns if c not in std_col_order]
+        attrs_backup = dict(out.attrs)
         out = out[std_col_order + extra_cols]
+        out.attrs.update(attrs_backup)
         return out
 
     def run(self, source: Any, **kwargs) -> pd.DataFrame:
@@ -1265,7 +1429,13 @@ def _clean_number(val: float) -> Any:
     return int(r) if r.is_integer() else r
 
 
-def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = True) -> List[str]:
+def export_to_sap(
+    df: pd.DataFrame,
+    filename: str = "",
+    use_db_dedup: bool = True,
+    cross_month_date_mode: str = "period_end",
+    cost_center_col: Optional[int] = None,
+) -> List[str]:
     """
     [100% 字节级复现 utils/export.py]：
     1. 第 1~5 行留空，从第 6 行 (start=6) 开始写入；
@@ -1283,6 +1453,8 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
     df_out = df.copy()
     if use_db_dedup:
         df_out = update_voucher_no(df_out)
+    else:
+        df_out = dedup_vouchers_offline(df_out)
 
     vno_arr = _to_str_list(df_out, "voucher_no")
     cpudt_arr = _to_str_list(df_out, "cpudt")
@@ -1293,6 +1465,7 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
     fast_acc_arr = _to_str_list(df_out, "fast_account")
     lifnr_arr = _to_str_list(df_out, "lifnr")
     kunnr_arr = _to_str_list(df_out, "kunnr")
+    cc_arr = _to_str_list(df_out, "cost_center")
     dir_arr = [d.upper() or "H" for d in _to_str_list(df_out, "direction")]
     orig_arr = pd.to_numeric(df_out["original_amount"], errors="coerce").fillna(0.0).to_numpy()
     book_arr = pd.to_numeric(df_out["book_amount"], errors="coerce").fillna(0.0).to_numpy()
@@ -1308,7 +1481,6 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
     radd = 0
     exported_files: List[str] = []
 
-    # 规范化基礎文件名：若传入已带 _1.result.xlsx 或 .result.xlsx 则剥离，统一按老项目 `_%d.result.xlsx` 拼接
     base_filename = re.sub(r"_\d+\.result\.xlsx$", "", out_path)
     if base_filename.endswith(".result.xlsx"):
         base_filename = base_filename[:-12]
@@ -1328,13 +1500,16 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
 
         target_row = row + radd
         currency = cur_arr[idx]
-        pdate = resolve_period_date(cpudt_arr[idx], year_arr[idx], period_arr[idx])
+        pdate = resolve_period_date(cpudt_arr[idx], year_arr[idx], period_arr[idx], cross_month_mode=cross_month_date_mode)
 
         sh.cell(target_row, 1, "CTY")
         sh.cell(target_row, 2, vno)
         sh.cell(target_row, 3, pdate)
         sh.cell(target_row, 4, currency)
         sh.cell(target_row, 5, 1 if currency == "VND" else float(ex_arr[idx]))
+
+        if cost_center_col in (6, 8, 10) and cc_arr[idx]:
+            sh.cell(target_row, cost_center_col, cc_arr[idx])
 
         cell_acc = sh.cell(target_row, 7, fast_acc_arr[idx])
         cell_acc.data_type = "s"
@@ -1343,11 +1518,10 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
             sh.cell(target_row, 11 if dir_arr[idx] == "S" else 12, _clean_number(orig_arr[idx]))
         sh.cell(target_row, 13 if dir_arr[idx] == "S" else 14, _clean_number(book_arr[idx]))
 
-        # 与老项目 utils/export.py 第 40~43 行完全一致：每行固定写入第 9、15、43 列
         cell_kh = sh.cell(target_row, 9, f"{lifnr_arr[idx]}{kunnr_arr[idx]}")
         cell_kh.data_type = "s"
 
-        sh.cell(target_row, 15, " ".join([txt_arr[idx], zuonr_arr[idx]]))
+        sh.cell(target_row, 15, " ".join([txt_arr[idx], zuonr_arr[idx]]).strip())
 
         gid = gid_arr[idx]
         sh.cell(target_row, 43, int(float(gid)) if (gid is not None and pd.notna(gid) and str(gid).strip() != "") else "")
@@ -1361,7 +1535,7 @@ def export_to_sap(df: pd.DataFrame, filename: str = "", use_db_dedup: bool = Tru
 
 
 # ==============================================================================
-# 6. [修复 2.3 #12, #13, #14] DataReconciler (含 remove_fast_errors) 与 SAPExporter
+# 6. [修复 2.3 #12, #13, #14 + 1104 安全闸] DataReconciler 与 SAPExporter
 # ==============================================================================
 class DataReconciler:
     def __init__(self, fiscalym: str):
@@ -1505,28 +1679,64 @@ class DataReconciler:
         ]
         return check_exist_voucher_no(missing_voucher_nos, self.calendarym)
 
-    def remove_fast_errors(self, gjahr: int, monat: int, so_ct: Set[str]) -> int:
-        """[修复 2.3 #13] 完整实现移除 FAST 差异科目/错账凭证数据"""
-        if not so_ct:
+    def remove_fast_errors(
+        self,
+        gjahr: int,
+        monat: int,
+        so_ct: Set[str],
+        dry_run: bool = False,
+        confirm: bool = True,
+    ) -> int:
+        """
+        [修复 2.3 #13 + 1104 安全闸] 完整实现移除 FAST 差异科目/错账凭证数据，
+        支持 dry_run SQL 预览、二次确认与审计日志。
+        """
+        clean_vnos = sorted(set(str(v).strip() for v in (so_ct or set()) if str(v).strip()))
+        if not clean_vnos:
             self.logger.info("remove_fast_errors: 传入的待删凭证集合为空，无需删除。")
             return 0
-        if not self.fast_pool:
-            raise RuntimeError("FAST 数据库连接不可用，无法执行 remove_fast_errors。")
 
         from db import MSSQLSQL
         ym = fiscalym_to_calendarym(f"{int(gjahr):04d}{int(monat):02d}")
-        voucher_list_str = ",".join([f"'{str(v).strip()}'" for v in so_ct if str(v).strip()])
+        voucher_list_str = ",".join([f"'{v}'" for v in clean_vnos])
 
         update_sql = MSSQLSQL.format_update_stt_rec({"ym": ym, "so_cts": voucher_list_str})
         delete_sql = MSSQLSQL.format_delete_stt_rec({"ym": ym})
+
+        _write_db_maintenance_audit(
+            "REMOVE_FAST_ERRORS",
+            {
+                "fiscal_ym": f"{int(gjahr):04d}{int(monat):02d}",
+                "calendar_ym": ym,
+                "voucher_count": len(clean_vnos),
+                "vouchers": clean_vnos,
+                "dry_run": dry_run,
+            },
+        )
+
+        if dry_run:
+            self.logger.info(
+                f"[DryRun 安全预览] remove_fast_errors 将在期间 {ym} 级联删除 {len(clean_vnos)} 张凭证: {clean_vnos}"
+            )
+            self.logger.info(f"[DryRun SQL 1] {update_sql.strip()}")
+            return len(clean_vnos)
+
+        if not confirm and sys.stdin and sys.stdin.isatty():
+            ans = input(f"[安全确认] 确认从 FAST 库 (期间 {ym}) 级联删除 {len(clean_vnos)} 张凭证吗？(y/N): ").strip().lower()
+            if ans != "y":
+                self.logger.warning("用户取消了 remove_fast_errors 删除操作。")
+                return 0
+
+        if not self.fast_pool:
+            raise RuntimeError("FAST 数据库连接不可用，无法执行 remove_fast_errors。")
 
         with self.fast_pool.begin_transaction() as tx:
             tx.execute(update_sql)
             tx.execute(delete_sql)
             tx.commit()
 
-        self.logger.info(f"成功从 FAST 数据库 (期间 {ym}) 移除 {len(so_ct)} 张错账凭证！")
-        return len(so_ct)
+        self.logger.info(f"成功从 FAST 数据库 (期间 {ym}) 移除 {len(clean_vnos)} 张错账凭证！")
+        return len(clean_vnos)
 
     def fetch_sap_to_fast(self) -> List[str]:
         voucher_nos = self.compare_account_diff()
@@ -1588,30 +1798,62 @@ class SAPExporter:
 
 
 # ==============================================================================
-# 7. [修复 2.3 #17 & #18 + CFO 需求 6] FAST 库维护与映射管理模块 (MappingManager)
+# 7. [修复 2.3 #17 & #18 + 1104 安全闸 + CFO 需求 6] FAST 库维护与 MappingManager
 # ==============================================================================
-def modify_fast_database(account_no: str, years: Optional[List[str]] = None) -> None:
-    """[修复 2.3 #17] 100% 复现 modify_fast_database.py"""
+def modify_fast_database(
+    account_no: str,
+    years: Optional[List[str]] = None,
+    dry_run: bool = False,
+    confirm: bool = True,
+) -> Dict[str, Any]:
+    """
+    [修复 2.3 #17 + 1104 安全闸] 100% 复现 modify_fast_database.py，
+    增加 dry_run 预览清单、二次确认开关与审计日志留痕。
+    """
     logger = setup_logger("ModifyFastDB")
-    from db import get_mssql_pool
-    pool = get_mssql_pool()
     update_tables = ["c11$000000", "r00${ym}", "d11${ym}", "o11$000000", "m11${ym}", "i11${ym}"]
     months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
     yrs = years or ["2024", "2025"]
     acc = account_no.strip()
 
+    sql_statements: List[str] = []
     for y in yrs:
         for mm in months:
             ym = f"{y}{mm}"
             for tbl in update_tables:
-                table_real = tbl.replace("${ym}", ym).replace("{ym}", ym)
-                sql = f"DELETE FROM {table_real} WHERE stt_rec IN (SELECT DISTINCT stt_rec FROM ct00 WHERE tk='{acc}');"
-                try:
-                    pool.execute_none(sql)
-                except Exception as e:
-                    logger.warning(f"清理表 {table_real} 跳过或异常: {e}")
-    pool.execute_none(f"DELETE FROM ct00 WHERE tk='{acc}';")
+                table_real = tbl.replace("{ym}", ym)
+                sql_statements.append(
+                    f"DELETE FROM {table_real} WHERE stt_rec IN (SELECT DISTINCT stt_rec FROM ct00 WHERE tk='{acc}');"
+                )
+    sql_statements.append(f"DELETE FROM ct00 WHERE tk='{acc}';")
+
+    _write_db_maintenance_audit(
+        "DELETE_FAST_ACCOUNT",
+        {"fast_account": acc, "years": yrs, "sql_count": len(sql_statements), "dry_run": dry_run},
+    )
+
+    if dry_run:
+        logger.info(f"[DryRun 安全预览] modify_fast_database 将对科目 '{acc}' 执行 {len(sql_statements)} 条级联 DELETE 语句")
+        for s in sql_statements[:6]:
+            logger.info(f"  [DryRun SQL] {s}")
+        return {"account": acc, "dry_run": True, "sql_count": len(sql_statements), "sql_preview": sql_statements[:10]}
+
+    if not confirm and sys.stdin and sys.stdin.isatty():
+        ans = input(f"[安全确认] 即将彻底删除 FAST 库 ({yrs}) 中科目 '{acc}' 的关联凭证，共 {len(sql_statements)} 条语句，确认执行吗？(y/N): ").strip().lower()
+        if ans != "y":
+            logger.warning("用户取消了 modify_fast_database 操作。")
+            return {"account": acc, "dry_run": False, "cancelled": True, "sql_count": 0}
+
+    from db import get_mssql_pool
+    pool = get_mssql_pool()
+    for sql in sql_statements[:-1]:
+        try:
+            pool.execute_none(sql)
+        except Exception as e:
+            logger.warning(f"清理表跳过或异常: {e}")
+    pool.execute_none(sql_statements[-1])
     logger.info(f"modify_fast_database 完成：已彻底删除 FAST 库中科目 {acc} 的关联凭证记录。")
+    return {"account": acc, "dry_run": False, "sql_count": len(sql_statements)}
 
 
 def update_fast_account(
@@ -1620,11 +1862,14 @@ def update_fast_account(
     years: Optional[List[str]] = None,
     scope: str = "ALL",
     commit: bool = True,
-) -> None:
-    """[修复 2.3 #18] 100% 复现并修复 update_account.py（开启真实 tx.execute 与 tx.commit）"""
+    dry_run: bool = False,
+    confirm: bool = True,
+) -> Dict[str, Any]:
+    """
+    [修复 2.3 #18 + 1104 安全闸] 100% 复现并修复 update_account.py，
+    支持真实事务提交、dry_run SQL 预览、二次确认与审计日志。
+    """
     logger = setup_logger("UpdateFastAccount")
-    from db import get_mssql_pool
-    pool = get_mssql_pool()
     yrs = years or ["2024", "2025"]
     months = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
 
@@ -1647,20 +1892,61 @@ def update_fast_account(
 
     is_usd_only = str(scope).upper() in ("1", "USD")
     templates = sql_usd if is_usd_only else sql_all
+    old_acc = old_account.strip()
+    new_acc = new_account.strip()
 
+    statements: List[str] = []
+    for y in yrs:
+        for m in months:
+            yyyymm = f"{y}{m}"
+            for tmpl in templates:
+                statements.append(tmpl.format(yyyymm=yyyymm, old_account=old_acc, new_account=new_acc))
+
+    is_preview = dry_run or (not commit)
+    _write_db_maintenance_audit(
+        "UPDATE_FAST_ACCOUNT",
+        {
+            "old_account": old_acc,
+            "new_account": new_acc,
+            "years": yrs,
+            "scope": "USD" if is_usd_only else "ALL",
+            "sql_count": len(statements),
+            "dry_run": is_preview,
+        },
+    )
+
+    if is_preview:
+        logger.info(
+            f"[DryRun 安全预览] update_fast_account ({old_acc} -> {new_acc}, 范围={'仅USD' if is_usd_only else '全币种'}) "
+            f"将生成 {len(statements)} 条 UPDATE 语句"
+        )
+        for s in statements[:6]:
+            logger.info(f"  [DryRun SQL] {s}")
+        return {
+            "old_account": old_acc,
+            "new_account": new_acc,
+            "dry_run": True,
+            "sql_count": len(statements),
+            "sql_preview": statements[:10],
+        }
+
+    if not confirm and sys.stdin and sys.stdin.isatty():
+        ans = input(
+            f"[安全确认] 即将把 FAST 库 ({yrs}) 中科目 '{old_acc}' 批量替换为 '{new_acc}'，共 {len(statements)} 条语句，确认执行吗？(y/N): "
+        ).strip().lower()
+        if ans != "y":
+            logger.warning("用户取消了 update_fast_account 操作。")
+            return {"old_account": old_acc, "new_account": new_acc, "dry_run": False, "cancelled": True, "sql_count": 0}
+
+    from db import get_mssql_pool
+    pool = get_mssql_pool()
     with pool.begin_transaction() as tx:
-        for y in yrs:
-            for m in months:
-                yyyymm = f"{y}{m}"
-                for tmpl in templates:
-                    stmt = tmpl.format(yyyymm=yyyymm, old_account=old_account.strip(), new_account=new_account.strip())
-                    if commit:
-                        tx.execute(stmt)
-                    else:
-                        logger.info(f"[DryRun] {stmt}")
-        if commit:
-            tx.commit()
-    logger.info(f"update_fast_account 完成：{old_account} -> {new_account} (范围={'仅USD' if is_usd_only else '全币种'})")
+        for stmt in statements:
+            tx.execute(stmt)
+        tx.commit()
+
+    logger.info(f"update_fast_account 完成：{old_acc} -> {new_acc} (范围={'仅USD' if is_usd_only else '全币种'})")
+    return {"old_account": old_acc, "new_account": new_acc, "dry_run": False, "sql_count": len(statements)}
 
 
 class MappingManager:
@@ -1725,8 +2011,17 @@ class MappingManager:
         partner_type: str = "vendor",
         sync_fast_db: bool = True,
         years: Optional[List[str]] = None,
+        sync_tables: Tuple[str, ...] = ("d11", "ct00"),
+        dry_run: bool = False,
         keep_log: bool = True,
     ) -> bool:
+        """
+        [实现 6.21 修改客商映射]：
+        1. 判断新 FAST 客商代码是否已存在，存在则提醒拦截；
+        2. 修改 config/account.yaml（dry_run=True 时仅预览 SQL 不落盘不改库）；
+        3. 同步更新 FAST 数据库客商字段（默认覆盖 d11${ym} 与 ct00，支持扩展 m11${ym} 与 dmkh）；
+        4. 默认保留修改审计日志。
+        """
         node = "vendor" if partner_type.lower() in ("vendor", "lifnr") else "customer"
         mapping = self.cfg.setdefault(node, {})
         sap_k = str(sap_partner).strip()
@@ -1737,28 +2032,55 @@ class MappingManager:
             return False
 
         old_fast_v = str(mapping.get(sap_k, sap_k)).strip()
+
+        yrs = years or ["2024", "2025"]
+        months = [f"{m:02d}" for m in range(1, 13)]
+        sql_list: List[str] = []
+        if "d11" in sync_tables:
+            for y in yrs:
+                for m in months:
+                    sql_list.append(f"UPDATE d11${y}{m} SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
+        if "m11" in sync_tables:
+            for y in yrs:
+                for m in months:
+                    sql_list.append(f"UPDATE m11${y}{m} SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
+        if "ct00" in sync_tables:
+            sql_list.append(f"UPDATE ct00 SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
+        if "dmkh" in sync_tables:
+            sql_list.append(f"UPDATE dmkh SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
+
+        if dry_run:
+            self.logger.info(
+                f"[6.21 DryRun 预览] 客商映射 {sap_k}: {old_fast_v} -> {new_fast_v} | "
+                f"同步表范围={sync_tables} | 将执行 {len(sql_list)} 条 SQL"
+            )
+            return True
+
         mapping[sap_k] = new_fast_v
         AccountConfig.save(self.cfg)
 
-        if sync_fast_db and old_fast_v:
+        if sync_fast_db and old_fast_v and sql_list:
             try:
                 from db import get_mssql_pool
                 pool = get_mssql_pool()
-                yrs = years or ["2024", "2025"]
-                months = [f"{m:02d}" for m in range(1, 13)]
                 with pool.begin_transaction() as tx:
-                    for y in yrs:
-                        for m in months:
-                            tx.execute(f"UPDATE d11${y}{m} SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
-                    tx.execute(f"UPDATE ct00 SET ma_kh='{new_fast_v}' WHERE RTRIM(ma_kh)='{old_fast_v}'")
+                    for stmt in sql_list:
+                        tx.execute(stmt)
                     tx.commit()
-                self.logger.info(f"[6.21 数据库同步] 已将 FAST 库中客商 {old_fast_v} 同步更新为 {new_fast_v}")
+                self.logger.info(f"[6.21 数据库同步] 已将 FAST 库 ({sync_tables}) 中客商 {old_fast_v} 同步更新为 {new_fast_v}")
             except Exception as e:
                 self.logger.warning(f"[6.21 数据库同步跳过/失败] {e}")
 
         self._write_audit_log(
             "6.21_UPDATE_PARTNER",
-            {"type": node, "sap": sap_k, "old_fast": old_fast_v, "new_fast": new_fast_v, "sync_db": sync_fast_db},
+            {
+                "type": node,
+                "sap": sap_k,
+                "old_fast": old_fast_v,
+                "new_fast": new_fast_v,
+                "sync_db": sync_fast_db,
+                "sync_tables": list(sync_tables),
+            },
             keep_log
         )
         return True
@@ -1771,6 +2093,7 @@ class MappingManager:
         force_multi: bool = False,
         sync_fast_db: bool = True,
         years: Optional[List[str]] = None,
+        dry_run: bool = False,
         keep_log: bool = True,
     ) -> bool:
         sap_k = str(sap_account).strip()
@@ -1803,12 +2126,21 @@ class MappingManager:
             )
             return False
 
+        if dry_run:
+            self.logger.info(
+                f"[6.22 DryRun 预览] SAP 科目 {sap_k} (fkber={fkber}): {old_fast_v} -> {new_fast_v} "
+                f"(一对一={is_one_to_one}, 关联科目数={len(set(related_sap_accounts))})"
+            )
+            if sync_fast_db and old_fast_v != new_fast_v:
+                update_fast_account(old_fast_v, new_fast_v, years=years, scope="ALL", commit=False, dry_run=True)
+            return True
+
         target_dict[sap_k] = new_fast_v
         AccountConfig.save(self.cfg)
 
         if sync_fast_db and old_fast_v != new_fast_v:
             try:
-                update_fast_account(old_fast_v, new_fast_v, years=years, scope="ALL", commit=True)
+                update_fast_account(old_fast_v, new_fast_v, years=years, scope="ALL", commit=True, dry_run=False, confirm=True)
             except Exception as e:
                 self.logger.warning(f"[6.22 数据库同步跳过/失败] {e}")
 
@@ -1830,13 +2162,68 @@ class MappingManager:
 
 
 # ==============================================================================
-# 8. [实现 CFO 需求 7] 自动登录 FAST 网页、循环上传文件、批量 Post 到总账
+# 8. [实现 CFO 需求 7 - 1104 全自动登录 + 循环上传 + 批量过账闭环]
 # ==============================================================================
-def upload_to_fast(input_dir: str = "output") -> int:
+def _perform_fast_login(
+    login_handler: Any,
+    config: Dict[str, Any],
+    logger: logging.Logger,
+    auto_login: bool = True,
+    interactive_fallback: bool = True,
+) -> bool:
+    """
+    执行 FAST 网页登录：
+    优先使用配置的 fast_user / fast_password / fast_unit 调用 LoginHandler.login() 自动填表登录；
+    若未配置账密或自动登录未成功，在交互式终端下优雅回退提示人工确认。
+    """
+    fast_user = str(config.get("fast_user") or "").strip()
+    fast_password = str(config.get("fast_password") or "").strip()
+    fast_unit = str(config.get("fast_unit") or "CTY").strip()
+
+    if auto_login and fast_user and fast_password:
+        logger.info(f"正在执行 FAST 自动填表登录 (账号: {fast_user}, 单位: {fast_unit})...")
+        if login_handler.login(fast_user, fast_password, fast_unit):
+            logger.info("FAST 网页自动登录验证通过！")
+            return True
+        logger.warning("FAST 自动填表登录未能确认跳转，准备检查或切换人工确认...")
+    else:
+        if not login_handler.navigate_to_login():
+            logger.error("导航到登录页面失败")
+            return False
+
+    if interactive_fallback and sys.stdin and sys.stdin.isatty():
+        logger.info("请确认完成 FAST 网页登录，按 Enter 键继续...")
+        input()
+        return True
+
+    if fast_user and fast_password:
+        return login_handler.is_logged_in()
+
+    logger.error("未提供 FAST_USER / FAST_PASSWORD 且当前为非交互模式，无法完成登录。")
+    return False
+
+
+def upload_to_fast(
+    input_dir: str = "output",
+    fast_user: str = "",
+    fast_password: str = "",
+    fast_unit: str = "",
+    auto_login: bool = True,
+    interactive_fallback: bool = True,
+    headless: bool = False,
+) -> int:
     logger = setup_logger("FastAutoUpload")
     config = Config().get_chrome_config()
+    if fast_user:
+        config["fast_user"] = fast_user
+    if fast_password:
+        config["fast_password"] = fast_password
+    if fast_unit:
+        config["fast_unit"] = fast_unit
+
     chrome_path = config.get("chrome_path", "")
-    remote_debugging_port = config.get("remote_debugging_port", 9222)
+    remote_debugging_port = int(config.get("remote_debugging_port", 9222))
+    fast_url = config.get("fast_url", "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx")
 
     if not chrome_path or not os.path.exists(chrome_path):
         logger.error(f"Chrome 路径无效: {chrome_path}")
@@ -1850,7 +2237,7 @@ def upload_to_fast(input_dir: str = "output") -> int:
     chrome_launcher = ChromeLauncher(chrome_path, remote_debugging_port)
     cdp_client = None
     try:
-        if not chrome_launcher.start_chrome():
+        if not chrome_launcher.start_chrome(headless=headless):
             logger.error("Chrome 启动失败")
             return 1
 
@@ -1859,22 +2246,23 @@ def upload_to_fast(input_dir: str = "output") -> int:
             logger.error("连接 CDP 失败")
             return 1
 
-        login_handler = LoginHandler(cdp_client)
-        if not hasattr(login_handler, "logger"):
-            login_handler.logger = logger
+        login_handler = LoginHandler(cdp_client, login_url=fast_url)
         upload_handler = UploadHandler(cdp_client)
 
-        if not login_handler.navigate_to_login():
-            logger.error("导航到登录页面失败")
+        if not _perform_fast_login(
+            login_handler,
+            config,
+            logger,
+            auto_login=auto_login,
+            interactive_fallback=interactive_fallback,
+        ):
             return 1
-
-        logger.info("请确认完成 FAST 网页登录，按 Enter 键继续执行批量上传...")
-        input()
 
         upload_handler.navigate_to_upload_page()
 
-        files = sorted(glob.glob(os.path.join(BASE_DIR, input_dir, "*.xlsx")))
-        uploaded_dir = os.path.join(BASE_DIR, input_dir, "uploaded")
+        target_dir = os.path.join(BASE_DIR, input_dir) if not os.path.isabs(input_dir) else input_dir
+        files = sorted(glob.glob(os.path.join(target_dir, "*.xlsx")))
+        uploaded_dir = os.path.join(target_dir, "uploaded")
         os.makedirs(uploaded_dir, exist_ok=True)
 
         for f in files:
@@ -1897,12 +2285,27 @@ def upload_to_fast(input_dir: str = "output") -> int:
     return 0
 
 
-def postToGl() -> int:
+def postToGl(
+    fast_user: str = "",
+    fast_password: str = "",
+    fast_unit: str = "",
+    auto_login: bool = True,
+    interactive_fallback: bool = True,
+    headless: bool = False,
+) -> int:
     logger = setup_logger("FastAutoPost")
     config = Config().get_chrome_config()
+    if fast_user:
+        config["fast_user"] = fast_user
+    if fast_password:
+        config["fast_password"] = fast_password
+    if fast_unit:
+        config["fast_unit"] = fast_unit
+
     chrome_path = config.get("chrome_path", "")
-    remote_debugging_port = config.get("remote_debugging_port", 9222)
-    max_retries = config.get("max_retries", 3)
+    remote_debugging_port = int(config.get("remote_debugging_port", 9222))
+    max_retries = int(config.get("max_retries", 3))
+    fast_url = config.get("fast_url", "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx")
 
     if not chrome_path or not os.path.exists(chrome_path):
         logger.error(f"Chrome 路径无效: {chrome_path}")
@@ -1916,7 +2319,7 @@ def postToGl() -> int:
     chrome_launcher = ChromeLauncher(chrome_path, remote_debugging_port)
     cdp_client = None
     try:
-        if not chrome_launcher.start_chrome():
+        if not chrome_launcher.start_chrome(headless=headless):
             logger.error("Chrome 启动失败")
             return 1
 
@@ -1925,17 +2328,17 @@ def postToGl() -> int:
             logger.error("连接 CDP 失败")
             return 1
 
-        login_handler = LoginHandler(cdp_client)
-        if not hasattr(login_handler, "logger"):
-            login_handler.logger = logger
+        login_handler = LoginHandler(cdp_client, login_url=fast_url)
         posting_handler = PostingHandler(cdp_client)
 
-        if not login_handler.navigate_to_login():
-            logger.error("导航到登录页面失败")
+        if not _perform_fast_login(
+            login_handler,
+            config,
+            logger,
+            auto_login=auto_login,
+            interactive_fallback=interactive_fallback,
+        ):
             return 1
-
-        logger.info("请确认完成 FAST 网页登录，按 Enter 键开始批量 Post 到总账...")
-        input()
 
         posting_handler.navigate_to_posting_page()
         retry_count = 0
@@ -1987,7 +2390,8 @@ def audit_local_files(input_pattern: str = "input/*.xlsx", output_dir: str = "ou
     patterns = [p.strip() for p in input_pattern.replace(";", ",").split(",") if p.strip()]
     files: List[str] = []
     for pat in patterns:
-        files.extend(sorted(glob.glob(os.path.join(BASE_DIR, pat))))
+        full_pat = pat if os.path.isabs(pat) else os.path.join(BASE_DIR, pat)
+        files.extend(sorted(glob.glob(full_pat)))
 
     if not files:
         logger.warning(f"未找到待审计文件: {input_pattern}")
@@ -2050,12 +2454,17 @@ def audit_local_files(input_pattern: str = "input/*.xlsx", output_dir: str = "ou
     return report_path
 
 
-def reprocess_local_files(input_pattern: str = "input/*.xlsx", output_dir: str = "output") -> List[str]:
+def reprocess_local_files(
+    input_pattern: str = "input/*.xlsx",
+    output_dir: str = "output",
+    process_cfg: Optional[ProcessConfig] = None,
+) -> List[str]:
     logger = setup_logger("LocalReprocess")
     patterns = [p.strip() for p in input_pattern.replace(";", ",").split(",") if p.strip()]
     files: List[str] = []
     for pat in patterns:
-        files.extend(sorted(glob.glob(os.path.join(BASE_DIR, pat))))
+        full_pat = pat if os.path.isabs(pat) else os.path.join(BASE_DIR, pat)
+        files.extend(sorted(glob.glob(full_pat)))
     if not files:
         logger.warning(f"未找到匹配的本地文件: {input_pattern}")
         return []
@@ -2063,7 +2472,9 @@ def reprocess_local_files(input_pattern: str = "input/*.xlsx", output_dir: str =
     out_dir = os.path.join(BASE_DIR, output_dir) if not os.path.isabs(output_dir) else output_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    processor = DataProcessor(ProcessConfig())
+    cfg = process_cfg or ProcessConfig()
+    processor = DataProcessor(cfg)
+    seen_voucher_registry: Dict[str, str] = {}
     out_files: List[str] = []
     for f in files:
         base = os.path.basename(f)
@@ -2076,8 +2487,17 @@ def reprocess_local_files(input_pattern: str = "input/*.xlsx", output_dir: str =
                 logger.warning(f"跳过 {base}: 处理后无有效数据。")
                 continue
 
+            if cfg.offline_voucher_dedup:
+                df_res = dedup_vouchers_offline(df_res, seen_registry=seen_voucher_registry)
+
             out_name = f"fixed_{base}"
-            exported = export_to_sap(df_res, filename=os.path.join(output_dir, out_name), use_db_dedup=False)
+            exported = export_to_sap(
+                df_res,
+                filename=os.path.join(output_dir, out_name),
+                use_db_dedup=False,
+                cross_month_date_mode=cfg.cross_month_date_mode,
+                cost_center_col=cfg.cost_center_col,
+            )
             out_files.extend(exported)
             logger.info(f"离线转换成功 (耗时 {time.time() - t0:.2f}s): {base} -> {exported} ({len(df_res)} 行)")
         except Exception as e:
@@ -2089,7 +2509,7 @@ def reprocess_local_files(input_pattern: str = "input/*.xlsx", output_dir: str =
 # 10. 命令行主入口
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="SAP2FAST (2396fast) 终极全量修复版")
+    parser = argparse.ArgumentParser(description="SAP2FAST (2390/2396fast) 1104 终极全量修复版")
     parser.add_argument(
         "--mode",
         choices=[
@@ -2107,20 +2527,41 @@ def main():
     parser.add_argument("--generate-sample", action="store_true", help="生成17列原始SAP样表并转换为FAST模板")
     parser.add_argument("--audit", action="store_true", help="对输入文件执行离线借贷平账审计")
 
+    # 映射与库表维护参数
     parser.add_argument("--sap-code", default="", help="SAP 科目或客商代码")
     parser.add_argument("--fast-code", default="", help="目标 FAST 科目或客商代码")
     parser.add_argument("--old-fast-code", default="", help="待替换的旧 FAST 科目代码")
     parser.add_argument("--fkber", default=None, help="功能范围 (如 1000/2000/3000)")
     parser.add_argument("--map-action", choices=["add-account", "add-partner", "update-account", "update-partner"], default="add-account")
     parser.add_argument("--force-multi", action="store_true", help="允许修改多对一科目映射并同步更新FAST库")
+    parser.add_argument("--partner-sync-scope", default="d11,ct00", help="修改客商同步改库范围 (默认 d11,ct00，可选 d11,ct00,m11,dmkh)")
+
+    # 1104 新增安全闸与业务配置参数
+    parser.add_argument("--dry-run", action="store_true", help="安全预览模式：仅输出将要执行的 SQL 清单与影响范围，不实际修改数据库")
+    parser.add_argument("--yes", action="store_true", help="免交互确认直接执行破坏性库表维护操作")
+    parser.add_argument("--interactive-mapping", action="store_true", help="遇到未映射10位SAP科目时交互式提示补录")
+    parser.add_argument("--cross-month-date", choices=["period_end", "cpudt"], default="period_end", help="跨月补记凭证日期规则 (默认 period_end 压缩至月末)")
+    parser.add_argument("--cost-center-col", type=int, choices=[6, 8, 10], default=None, help="可选将成本中心输出至43列模板的指定空列 (6/8/10)")
+
+    # 1104 网页自动化账密参数
+    parser.add_argument("--fast-user", default="", help="FAST 网页登录用户名 (不传则读取配置或环境变量 FAST_USER)")
+    parser.add_argument("--fast-password", default="", help="FAST 网页登录密码 (不传则读取配置或环境变量 FAST_PASSWORD)")
+    parser.add_argument("--fast-unit", default="CTY", help="FAST 网页登录单位 (默认 CTY)")
+    parser.add_argument("--headless", action="store_true", help="使用无头模式启动 Chrome CDP")
     args = parser.parse_args()
 
     logger = setup_logger("MAIN")
-    logger.info(f"启动 SAP2FAST，当前模式: {args.mode}")
+    logger.info(f"启动 SAP2FAST (1104全量版)，当前模式: {args.mode}")
+
+    proc_cfg = ProcessConfig(
+        interactive_mapping=args.interactive_mapping,
+        cross_month_date_mode=args.cross_month_date,
+        cost_center_col=args.cost_center_col,
+    )
 
     if args.generate_sample:
         sample_file = generate_raw_sap_sample_file()
-        reprocess_local_files(input_pattern=sample_file, output_dir=args.output)
+        reprocess_local_files(input_pattern=sample_file, output_dir=args.output, process_cfg=proc_cfg)
         return
 
     if args.audit:
@@ -2128,7 +2569,7 @@ def main():
         return
 
     if args.mode == "local":
-        reprocess_local_files(input_pattern=args.input, output_dir=args.output)
+        reprocess_local_files(input_pattern=args.input, output_dir=args.output, process_cfg=proc_cfg)
     elif args.mode == "export":
         SAPExporter(cpudt=args.cpudt).run()
     elif args.mode == "reconcile":
@@ -2137,29 +2578,52 @@ def main():
         SAPExporter(cpudt=args.cpudt).run()
         DataReconciler(fiscalym=args.fiscalym).fetch_sap_to_fast()
     elif args.mode == "upload":
-        upload_to_fast(input_dir=args.output)
+        upload_to_fast(
+            input_dir=args.output,
+            fast_user=args.fast_user,
+            fast_password=args.fast_password,
+            fast_unit=args.fast_unit,
+            headless=args.headless,
+        )
     elif args.mode == "post":
-        postToGl()
+        postToGl(
+            fast_user=args.fast_user,
+            fast_password=args.fast_password,
+            fast_unit=args.fast_unit,
+            headless=args.headless,
+        )
     elif args.mode == "delete-account":
         if not args.fast_code:
             logger.error("请通过 --fast-code 指定要删除的 FAST 科目代码")
             return
-        modify_fast_database(args.fast_code)
+        modify_fast_database(args.fast_code, dry_run=args.dry_run, confirm=args.yes)
     elif args.mode == "update-account":
         if not args.old_fast_code or not args.fast_code:
             logger.error("请通过 --old-fast-code 和 --fast-code 指定旧科目与新科目")
             return
-        update_fast_account(args.old_fast_code, args.fast_code, commit=True)
+        update_fast_account(args.old_fast_code, args.fast_code, commit=not args.dry_run, dry_run=args.dry_run, confirm=args.yes)
     elif args.mode == "manage-mapping":
         mgr = MappingManager()
+        sync_tables = tuple(x.strip() for x in args.partner_sync_scope.split(",") if x.strip())
         if args.map_action == "add-account":
             mgr.add_account_mapping(args.sap_code, args.fast_code, fkber=args.fkber)
         elif args.map_action == "add-partner":
             mgr.add_partner_mapping(args.sap_code, args.fast_code)
         elif args.map_action == "update-partner":
-            mgr.update_partner_mapping(args.sap_code, args.fast_code)
+            mgr.update_partner_mapping(
+                args.sap_code,
+                args.fast_code,
+                sync_tables=sync_tables,
+                dry_run=args.dry_run,
+            )
         elif args.map_action == "update-account":
-            mgr.update_account_mapping(args.sap_code, args.fast_code, fkber=args.fkber, force_multi=args.force_multi)
+            mgr.update_account_mapping(
+                args.sap_code,
+                args.fast_code,
+                fkber=args.fkber,
+                force_multi=args.force_multi,
+                dry_run=args.dry_run,
+            )
 
 
 if __name__ == "__main__":

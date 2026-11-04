@@ -4,12 +4,13 @@ from utils import CDPClient, setup_logger
 
 
 class LoginHandler:
-    def __init__(self, cdp_client: CDPClient):
+    def __init__(self, cdp_client: CDPClient, login_url: str = ""):
         self.cdp = cdp_client
-        self.login_url = "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx"
+        self.login_url = login_url or "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx"
+        self.logger = setup_logger(__name__)
 
     def navigate_to_login(self) -> bool:
-        self.logger.info("正在导航到登录页面...")
+        self.logger.info(f"正在导航到登录页面: {self.login_url}")
         return self.cdp.navigate(self.login_url)
 
     def wait_for_page_ready(self, timeout: int = 30) -> bool:

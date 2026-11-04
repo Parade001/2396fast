@@ -278,17 +278,24 @@ class PostingHandler:
         print(f"等待处理完成超时（{timeout}秒）")
         return False
 
-    def process_posting(self) -> bool:        
-
+    def process_posting(self) -> bool:
         if not self.has_more_records():
             print("没有更多需要过帐的记录")
             return False
 
-        self.click_all_checkboxes()
-        self.click_post_to_gl_button()
-        print("点击 Post TO GL 按钮失败")    
-        self.wait_for_processing()
+        checked_count = self.click_all_checkboxes()
+        if checked_count <= 0:
+            print("未勾选到可过账的复选框记录")
+            return False
+
+        if not self.click_post_to_gl_button():
+            print("点击 Post TO GL 按钮失败")
+            return False
+
+        print("已点击 Post TO GL 按钮，正在等待过账处理完成...")
+        if not self.wait_for_processing():
+            print("等待过账处理完成超时")
+            return False
+
         print("过帐处理完成")
         return True
-
-    
