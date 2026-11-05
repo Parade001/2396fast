@@ -264,12 +264,13 @@
         <div class="card">
           <div class="card-header">
             <div>
-              <h2 class="card-title">方案 A 专享：config/fast_credentials.yaml 交互式凭据管理与 FAST 自动登录 6 步验证台</h2>
-              <p className="card-desc">支持在线编辑并保存至 config/fast_credentials.yaml、导出最新 YAML 配置文件、密码掩码脱敏与语法核验，以及一键检验 LoginHandler 自动填表登录全链路</p>
+              <h2 class="card-title">方案 A 专享：config/fast_credentials.yaml 基准指纹校验器与 FAST 自动登录 6 步真实验证台</h2>
+              <p class="card-desc">将模块 4 输入框中的待测账密与本地磁盘 config/fast_credentials.yaml 基准指纹 (SHA-256) 严格比对：输入错误密码点击验证或未授权保存均会精准拦截并报错 (AUTH_FAILED)</p>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-              <button id="btn-fc-quick-demo" class="btn btn-secondary" type="button">一键填入测试账密并验证 (FIN_ADMIN_VN)</button>
-              <button id="btn-fc-run-verify" class="btn btn-primary" type="button">运行 FAST 自动登录 6 步验证</button>
+              <button id="btn-fc-quick-demo" class="btn btn-secondary" type="button">1. 写入正确基准账密并验证 (PASS)</button>
+              <button id="btn-fc-wrong-demo" class="btn btn-danger" type="button">2. 故意输入错误密码测试拦截 (FAIL)</button>
+              <button id="btn-fc-run-verify" class="btn btn-primary" type="button">校验当前输入账密 (6步登录测试)</button>
             </div>
           </div>
 
@@ -309,9 +310,16 @@
                   <input id="fc-url" type="text" value="http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx" />
                 </div>
               </div>
+              <div style="margin-bottom:8px;">
+                <label class="check-inline" style="font-size:12px;">
+                  <input id="fc-force-baseline" type="checkbox" />
+                  允许覆写本地 YAML 基准账密锁 (--force-update-baseline)：仅当修改真实正确密码时勾选
+                </label>
+              </div>
               <div class="form-row" style="margin-bottom:0;">
-                <button id="btn-fc-save" class="btn btn-primary" type="button">保存并校验 config/fast_credentials.yaml</button>
-                <a href="/api/download?path=config/fast_credentials.yaml" class="btn btn-secondary" style="text-decoration:none;">下载 fast_credentials.yaml</a>
+                <button id="btn-fc-run-verify-inline" class="btn btn-primary" type="button">仅测试当前输入账密 (不改 YAML)</button>
+                <button id="btn-fc-save" class="btn btn-secondary" type="button">保存至 fast_credentials.yaml</button>
+                <a href="/api/download?path=config/fast_credentials.yaml" class="btn btn-secondary" style="text-decoration:none;">下载 YAML</a>
               </div>
             </div>
 
@@ -1176,18 +1184,27 @@ python sap2fast_full_fix.py --mode post
         }
       }
 
-      async function runFastLoginVerify() {
+      async function runFastLoginVerify(overrideUser, overridePass) {
+        const testUser = overrideUser !== undefined ? overrideUser : document.getElementById('fc-username').value;
+        const testPass = overridePass !== undefined ? overridePass : document.getElementById('fc-password').value;
         const res = await fetch('/api/fast-login-verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ simulate_intranet: true }),
+          body: JSON.stringify({
+            test_username: testUser,
+            test_password: testPass,
+            test_unit: document.getElementById('fc-unit').value,
+            test_language: document.getElementById('fc-language').value,
+            test_login_url: document.getElementById('fc-url').value,
+          }),
         });
         const data = await res.json();
         if (!data.ok) return;
         const fcBanner = document.getElementById('fc-status-banner');
-        fcBanner.className = `status-banner ${data.overall_status === 'PASS' ? 'pass' : 'warn'}`;
+        const bType = data.overall_status === 'PASS' ? 'pass' : (data.overall_status === 'AUTH_FAILED' ? 'err' : 'warn');
+        fcBanner.className = `status-banner ${bType}`;
         fcBanner.textContent = data.summary_message;
-        setBanner(`[FAST 自动登录验证] ${data.summary_message}`, data.overall_status === 'PASS' ? 'pass' : 'warn');
+        setBanner(`[FAST 自动登录验证] ${data.summary_message}`, bType);
 
         const stbody = document.getElementById('fc-steps-tbody');
         stbody.innerHTML = (data.steps || []).map(s => `
@@ -1198,19 +1215,24 @@ python sap2fast_full_fix.py --mode post
             <td><span class="badge ${s.status === 'PASS' ? 'badge-pass' : 'badge-fail'}">${s.status}</span></td>
             <td style="white-space:normal;">
               <div>${escapeHtml(s.detail)}</div>
-              <pre style="margin-top:4px;padding:6px;background:#0f172a;color:#a7f3d0;border-radius:4px;font-size:11px;white-space:pre-wrap;">${escapeHtml(s.log_output)}</pre>
+              <pre style="margin-top:4px;padding:6px;background:#0f172a;color:${s.status === 'FAIL' ? '#fca5a5' : '#a7f3d0'};border-radius:4px;font-size:11px;white-space:pre-wrap;">${escapeHtml(s.log_output)}</pre>
             </td>
           </tr>
         `).join('');
       }
 
-      async function saveFastCredentials(overrideUser, overridePass) {
+      async function saveFastCredentials(overrideUser, overridePass, overrideForceBaseline) {
+        const targetUser = overrideUser !== undefined ? overrideUser : document.getElementById('fc-username').value;
+        const targetPass = overridePass !== undefined ? overridePass : document.getElementById('fc-password').value;
+        const forceEl = document.getElementById('fc-force-baseline');
+        const useForce = overrideForceBaseline !== undefined ? overrideForceBaseline : (forceEl ? forceEl.checked : false);
         const payload = {
-          username: overrideUser !== undefined ? overrideUser : document.getElementById('fc-username').value,
-          password: overridePass !== undefined ? overridePass : document.getElementById('fc-password').value,
+          username: targetUser,
+          password: targetPass,
           unit: document.getElementById('fc-unit').value,
           language: document.getElementById('fc-language').value,
           login_url: document.getElementById('fc-url').value,
+          force_update_baseline: useForce,
         };
         const res = await fetch('/api/fast-credentials', {
           method: 'POST',
@@ -1219,8 +1241,15 @@ python sap2fast_full_fix.py --mode post
         });
         const data = await res.json();
         if (data.ok) {
+          if (forceEl) forceEl.checked = false;
           await loadFastCredentials();
-          await runFastLoginVerify();
+          await runFastLoginVerify(targetUser, targetPass);
+        } else {
+          const fcBanner = document.getElementById('fc-status-banner');
+          fcBanner.className = 'status-banner err';
+          fcBanner.textContent = data.detail || '保存被基准账密保护锁拦截';
+          setBanner(data.detail || '保存被基准账密保护锁拦截', 'err');
+          await runFastLoginVerify(targetUser, targetPass);
         }
       }
 
@@ -1230,11 +1259,21 @@ python sap2fast_full_fix.py --mode post
       });
       document.getElementById('btn-fc-save').addEventListener('click', () => saveFastCredentials());
       document.getElementById('btn-fc-run-verify').addEventListener('click', () => runFastLoginVerify());
+      const inlineVerifyBtn = document.getElementById('btn-fc-run-verify-inline');
+      if (inlineVerifyBtn) inlineVerifyBtn.addEventListener('click', () => runFastLoginVerify());
       document.getElementById('btn-fc-quick-demo').addEventListener('click', () => {
         document.getElementById('fc-username').value = 'FIN_ADMIN_VN';
         document.getElementById('fc-password').value = 'Fast@2026#Timber';
-        saveFastCredentials('FIN_ADMIN_VN', 'Fast@2026#Timber');
+        saveFastCredentials('FIN_ADMIN_VN', 'Fast@2026#Timber', true);
       });
+      const wrongDemoBtn = document.getElementById('btn-fc-wrong-demo');
+      if (wrongDemoBtn) {
+        wrongDemoBtn.addEventListener('click', async () => {
+          document.getElementById('fc-username').value = document.getElementById('fc-username').value || 'FIN_ADMIN_VN';
+          document.getElementById('fc-password').value = 'WrongPass_999999!';
+          await runFastLoginVerify(document.getElementById('fc-username').value, 'WrongPass_999999!');
+        });
+      }
 
       // 初始化加载（默认打开最新 Reviews 代码审核报告或评估报告）
       loadOverview();

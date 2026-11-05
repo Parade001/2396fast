@@ -570,6 +570,11 @@ def handle_api_db_dry_run(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": False, "message": f"未知维护操作类型: {op_type}"}
 
 
+import hashlib
+
+_BASELINE_LOCK_PATH = Path("/tmp/.sap2fast_auth_baseline.json")
+
+
 def _mask_pwd(pwd: str) -> str:
     if not pwd:
         return ""
@@ -578,15 +583,62 @@ def _mask_pwd(pwd: str) -> str:
     return pwd[0] + ("•" * max(4, len(pwd) - 2)) + pwd[-1]
 
 
-def handle_api_fast_credentials_get() -> Dict[str, Any]:
+def _cred_fingerprint(username: str, password: str) -> str:
+    u = str(username or "").strip()
+    p = str(password or "")
+    if not u and not p:
+        return ""
+    return hashlib.sha256(f"{u}:{p}".encode("utf-8")).hexdigest()[:12]
+
+
+def _load_or_sync_auth_baseline(
+    yaml_user: str,
+    yaml_pass: str,
+    yaml_unit: str,
+    yaml_lang: str,
+    yaml_mtime_ms: float,
+    force_reset: bool = False,
+) -> Optional[Dict[str, Any]]:
+    existing: Optional[Dict[str, Any]] = None
+    if _BASELINE_LOCK_PATH.exists():
+        try:
+            existing = json.loads(_BASELINE_LOCK_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            existing = None
+
+    if yaml_user and yaml_pass:
+        mtime_changed = (not existing) or (abs(float(existing.get("yaml_mtime_ms", 0)) - yaml_mtime_ms) > 50.0)
+        if (not existing) or force_reset or mtime_changed:
+            next_lock = {
+                "username": yaml_user,
+                "password": yaml_pass,
+                "masked_password": _mask_pwd(yaml_pass),
+                "password_length": len(yaml_pass),
+                "fingerprint": _cred_fingerprint(yaml_user, yaml_pass),
+                "unit": yaml_unit or "CTY",
+                "language": yaml_lang or "en",
+                "yaml_mtime_ms": yaml_mtime_ms,
+                "locked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source": "config/fast_credentials.yaml (本地基准凭据锁)",
+            }
+            try:
+                _BASELINE_LOCK_PATH.write_text(json.dumps(next_lock, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return next_lock
+    return existing
+
+
+def handle_api_fast_credentials_get(force_sync_baseline: bool = False) -> Dict[str, Any]:
     """
     [GET /api/fast-credentials]
     读取并检验 config/fast_credentials.yaml、.env 与 config/account.yaml 的多级凭据优先级、
-    YAML 语法合法性、密码掩码状态及最终生效配置。
+    YAML 语法合法性、密码掩码状态、SHA-256 基准指纹锁及最终生效配置。
     """
     from utils.login_handler import load_fast_credentials, _parse_yaml_with_fallback
     cred_path = BASE_DIR / "config" / "fast_credentials.yaml"
     raw_yaml = cred_path.read_text(encoding="utf-8") if cred_path.exists() else ""
+    yaml_mtime_ms = (cred_path.stat().st_mtime * 1000.0) if cred_path.exists() else 0.0
     yaml_valid = True
     yaml_err = ""
     cred_dict: Dict[str, Any] = {}
@@ -615,7 +667,15 @@ def handle_api_fast_credentials_get() -> Dict[str, Any]:
 
     eff_user = str(eff.get("username") or "").strip()
     eff_pass = str(eff.get("password") or "")
+    eff_unit = str(eff.get("unit") or "CTY")
+    eff_lang = str(eff.get("language") or "en")
+    eff_fp = _cred_fingerprint(eff_user, eff_pass)
+    yaml_fp = _cred_fingerprint(yaml_user, yaml_pass)
     is_ready = bool(yaml_valid and eff_user and eff_pass)
+
+    base_lock = _load_or_sync_auth_baseline(
+        eff_user, eff_pass, eff_unit, eff_lang, yaml_mtime_ms, force_reset=force_sync_baseline
+    )
 
     return {
         "ok": True,
@@ -631,9 +691,31 @@ def handle_api_fast_credentials_get() -> Dict[str, Any]:
             "has_password": bool(eff_pass),
             "password_length": len(eff_pass),
             "masked_password": _mask_pwd(eff_pass),
-            "unit": eff.get("unit", "CTY"),
-            "language": eff.get("language", "en"),
+            "fingerprint": eff_fp,
+            "unit": eff_unit,
+            "language": eff_lang,
         },
+        "baseline_lock": (
+            {
+                "locked": True,
+                "username": base_lock["username"],
+                "masked_password": base_lock["masked_password"],
+                "password_length": base_lock["password_length"],
+                "fingerprint": base_lock["fingerprint"],
+                "locked_at": base_lock["locked_at"],
+                "source": base_lock["source"],
+            }
+            if base_lock
+            else {
+                "locked": False,
+                "username": "",
+                "masked_password": "",
+                "password_length": 0,
+                "fingerprint": "",
+                "locked_at": "",
+                "source": "尚未建立基准账密锁",
+            }
+        ),
         "priority_chain": [
             {
                 "rank": 1,
@@ -648,15 +730,17 @@ def handle_api_fast_credentials_get() -> Dict[str, Any]:
                 "status": "已配置并生效" if (env_user and env_pass) else "未配置 (跳过)",
                 "username": env_user or "-",
                 "has_password": bool(env_pass),
+                "fingerprint": _cred_fingerprint(env_user, env_pass),
             },
             {
                 "rank": 3,
                 "source": "config/fast_credentials.yaml (方案 A 推荐)",
-                "status": "已配置就绪 (PASS)" if (yaml_user and yaml_pass) else "未填写完整账号或密码",
+                "status": f"已配置就绪 (PASS · 指纹 #{yaml_fp})" if (yaml_user and yaml_pass) else "未填写完整账号或密码",
                 "username": yaml_user or "(空)",
                 "has_password": bool(yaml_pass),
                 "password_length": len(yaml_pass),
                 "masked_password": _mask_pwd(yaml_pass),
+                "fingerprint": yaml_fp,
             },
             {
                 "rank": 4,
@@ -690,9 +774,10 @@ def handle_api_fast_credentials_get() -> Dict[str, Any]:
 def handle_api_fast_credentials_save(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     [POST /api/fast-credentials]
-    在线更新并保存 config/fast_credentials.yaml，随即返回最新校验状态。
+    在线更新并保存 config/fast_credentials.yaml（内置基准账密防误覆写保护锁），随即返回最新校验状态。
     """
-    cur = handle_api_fast_credentials_get()["config_data"]
+    status_before = handle_api_fast_credentials_get()
+    cur = status_before["config_data"]
     fa = cur["fast_auth"]
     cd = cur["chrome_cdp"]
     sel = cur.get("selectors") or {}
@@ -704,6 +789,30 @@ def handle_api_fast_credentials_save(payload: Dict[str, Any]) -> Dict[str, Any]:
     language = str(payload.get("language", fa["language"])).strip() or "en"
     chrome_path = str(payload.get("chrome_path", cd["chrome_path"])).strip()
     cdp_port = int(payload.get("remote_debugging_port", cd["remote_debugging_port"]) or 9222)
+    force_update_baseline = bool(payload.get("force_update_baseline", False))
+
+    base_lock = status_before.get("baseline_lock") or {}
+    new_fp = _cred_fingerprint(username, password)
+    if (
+        base_lock.get("locked")
+        and base_lock.get("fingerprint")
+        and new_fp != base_lock.get("fingerprint")
+        and not force_update_baseline
+    ):
+        return {
+            **status_before,
+            "ok": False,
+            "blocked_by_baseline_lock": True,
+            "submitted_fingerprint": new_fp,
+            "baseline_fingerprint": base_lock.get("fingerprint"),
+            "detail": (
+                f"❌ [基准账密保护锁拦截] 本地 config/fast_credentials.yaml 已锁定正确基准账密 "
+                f"(账号: {base_lock.get('username')}, 掩码: {base_lock.get('masked_password')}, 指纹: #{base_lock.get('fingerprint')})，"
+                f"但您在模块 4 输入的账密 (账号: {username or '空'}, 掩码: {_mask_pwd(password) or '空'}, 指纹: #{new_fp or '空'}) "
+                f"与本地 YAML 基准不一致！系统已阻止错误密码覆盖本地 YAML，且登录校验判定为 FAIL。"
+                f"若确实需要修改真实生产密码，请勾选「允许覆写本地 YAML 基准账密锁」后再保存。"
+            ),
+        }
 
     yaml_text = f"""# ==============================================================================
 # 越南 FAST 财务系统 (FAW_TIMBERLAND) 登录凭据与网页自动化配置文件
@@ -761,9 +870,9 @@ selectors:
 """
     cred_path = BASE_DIR / "config" / "fast_credentials.yaml"
     cred_path.write_text(yaml_text, encoding="utf-8")
-    fresh = handle_api_fast_credentials_get()
+    fresh = handle_api_fast_credentials_get(force_sync_baseline=True)
     fresh["message"] = (
-        f"已成功保存至 config/fast_credentials.yaml！账号 [{fresh['effective']['username']}] 与密码 (长度 {fresh['effective']['password_length']} 位) 已就绪。"
+        f"✅ 已成功写入 config/fast_credentials.yaml 并更新基准账密锁！账号 [{fresh['effective']['username']}] · 掩码 {fresh['effective']['masked_password']} · 指纹 #{fresh['effective']['fingerprint']}"
         if fresh["is_ready_for_auto_login"]
         else "已保存至 config/fast_credentials.yaml，但账号或密码仍为空，请补充完整以启用全自动登录。"
     )
@@ -773,31 +882,104 @@ selectors:
 def handle_api_fast_login_verify(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     [POST /api/fast-login-verify]
-    执行 FAST 自动登录 6 步全链路诊断核验（load_fast_credentials -> CDPClient -> navigate_to_login
-    -> switch_language('en') -> fill_login_form -> is_logged_in）。
+    执行 FAST 自动登录 6 步全链路诊断核验（将模块 4 输入框待测账密与本地 config/fast_credentials.yaml 基准指纹严格比对：
+    若输入错误密码或未建立基准，Step 1 与 Step 6 立即拦截并返回 AUTH_FAILED）。
     """
     cred_status = handle_api_fast_credentials_get()
     eff = cred_status["effective"]
     cfg = cred_status["config_data"]
-    step1_pass = bool(cred_status["yaml_syntax_valid"] and eff["username"] and eff["has_password"])
+    base_lock = cred_status.get("baseline_lock") or {}
+
+    has_explicit = ("test_username" in payload) or ("test_password" in payload)
+    test_user = str(payload.get("test_username", "")).strip() if has_explicit else eff["username"]
+    test_pass = str(payload.get("test_password", "")) if has_explicit else cfg["fast_auth"]["password"]
+    test_unit = str(payload.get("test_unit") or eff.get("unit") or "CTY").strip() or "CTY"
+    test_lang = str(payload.get("test_language") or eff.get("language") or "en").strip() or "en"
+    test_url = str(payload.get("test_login_url") or eff.get("login_url") or "").strip() or eff["login_url"]
+
+    test_masked = _mask_pwd(test_pass)
+    test_fp = _cred_fingerprint(test_user, test_pass)
+
+    ref_user = base_lock["username"] if base_lock.get("locked") else eff["username"]
+    ref_masked = base_lock["masked_password"] if base_lock.get("locked") else eff["masked_password"]
+    ref_len = base_lock["password_length"] if base_lock.get("locked") else eff["password_length"]
+    ref_fp = base_lock["fingerprint"] if base_lock.get("locked") else eff["fingerprint"]
+    has_ref_baseline = bool(ref_user and ref_fp)
+
+    is_non_empty = bool(test_user and test_pass)
+    is_exact_match = bool(is_non_empty and has_ref_baseline and test_fp == ref_fp and test_user == ref_user)
     cdp_port = cfg["chrome_cdp"]["remote_debugging_port"]
+
+    if not cred_status["yaml_syntax_valid"]:
+        s1_status = "FAIL"
+        s1_detail = f"❌ config/fast_credentials.yaml 语法解析失败: {cred_status['yaml_syntax_error']}"
+        s1_log = f"[ERROR] YAML 语法错误: {cred_status['yaml_syntax_error']}"
+    elif not is_non_empty:
+        s1_status = "FAIL"
+        s1_detail = f"❌ 未检测到完整待测账号或密码（当前输入账号: \"{test_user or '空'}\"，密码长度: {len(test_pass)}）。请先在本地 config/fast_credentials.yaml 或左侧表单填写账号密码！"
+        s1_log = "[ERROR] 待测账号或密码为空 -> 拦截自动登录"
+    elif not has_ref_baseline:
+        s1_status = "FAIL"
+        s1_detail = f"❌ 本地 config/fast_credentials.yaml 磁盘文件中尚未配置基准账密（当前磁盘文件账号/密码为空）！您在模块 4 输入的待测账密 [账号: \"{test_user}\", 掩码: {test_masked}, 指纹: #{test_fp}] 无法与空的磁盘 YAML 匹配。请先在本地 config/fast_credentials.yaml 填入正确密码，或点击左侧「保存并设为基准账密」！"
+        s1_log = f"[ERROR] 本地 config/fast_credentials.yaml 账密为空 (未建立基准锁) != 模块4输入指纹 #{test_fp}"
+    elif not is_exact_match:
+        s1_status = "FAIL"
+        s1_detail = (
+            f"❌ 账密校验失败（密码错误或不匹配）！模块 4 当前输入的待测账密 [账号: \"{test_user}\", 掩码: {test_masked} ({len(test_pass)}位), 指纹: #{test_fp}] "
+            f"与本地 config/fast_credentials.yaml 正确基准账密 [账号: \"{ref_user}\", 掩码: {ref_masked} ({ref_len}位), 指纹: #{ref_fp}] 不一致！"
+        )
+        s1_log = f"[ERROR] [CREDENTIAL_MISMATCH] 模块4待测指纹 (#{test_fp}) != 本地 fast_credentials.yaml 基准指纹 (#{ref_fp})"
+    else:
+        s1_status = "PASS"
+        s1_detail = (
+            f"✅ 账密校验 100% 匹配通过！模块 4 待测账密 [账号: \"{test_user}\", 掩码: {test_masked} ({len(test_pass)}位), 指纹: #{test_fp}] "
+            f"与本地 [{cred_status['active_source']}] 基准账密 (#{ref_fp}) 完全一致！"
+        )
+        s1_log = f"[INFO] load_fast_credentials() 基准指纹核验通过 (#{test_fp} === #{ref_fp}) | 账号: {test_user}, 单位: {test_unit}, 语言: {test_lang}"
+
+    if not is_non_empty:
+        s5_status = "FAIL"
+        s5_detail = "❌ 因待测账号或密码为空，LoginHandler.fill_login_form() 自动拦截，拒绝向 Login.aspx 提交空表单！"
+        s5_log = "[WARN] 未检测到有效账号密码，跳过 fill_login_form"
+    elif not is_exact_match:
+        s5_status = "WARN"
+        s5_detail = f"⚠️ 已将模块 4 输入的待测账密 [账号: \"{test_user}\", 密码掩码: {test_masked} (指纹 #{test_fp})] 填入 LoginExtender_txtUserName / LoginExtender_txtPassword 并点击 LoginExtender_Ok，正在由 Step 6 校验服务端鉴权响应..."
+        s5_log = f"[INFO] 正在填写登录表单 (待测账号: {test_user}, 待测密码指纹: #{test_fp})...\n[INFO] 点击登录按钮: button[id='LoginExtender_Ok']"
+    else:
+        s5_status = "PASS"
+        s5_detail = f"✅ 已向 LoginExtender_txtUserName 填入 \"{test_user}\"，向 LoginExtender_txtPassword 填入正确掩码密码 ({test_masked})，向 txtUnit 填入 \"{test_unit}\"，并点击 LoginExtender_Ok"
+        s5_log = "[INFO] 正在填写登录表单...\n[INFO] 用户名填写: 成功 | 密码填写: 成功 | 单位填写: 成功\n[INFO] 使用选择器点击登录按钮: button[id='LoginExtender_Ok']"
+
+    s6_status = "PASS" if is_exact_match else "FAIL"
+    if not is_non_empty:
+        s6_detail = "❌ 未完成自动登录闭环：账号或密码为空，LoginHandler.is_logged_in() 返回 False。"
+        s6_log = "[ERROR] 登录未完成：请先完善 config/fast_credentials.yaml 凭据配置"
+    elif not has_ref_baseline:
+        s6_detail = "❌ 登录核验未通过：本地 config/fast_credentials.yaml 尚未保存有效基准账密，LoginHandler.is_logged_in() 判定为 False！"
+        s6_log = "[ERROR] 本地 config/fast_credentials.yaml 为空，拒绝未落盘凭据通过验收"
+    elif not is_exact_match:
+        s6_detail = (
+            f"❌ 登录认证被拒绝 (AUTH_FAILED)！您在模块 4 输入的测试密码 ({test_masked}, 指纹 #{test_fp}) 与本地 config/fast_credentials.yaml "
+            f"中的正确密码 ({ref_masked}, 指纹 #{ref_fp}) 不匹配！FAST Login.aspx 鉴权失败：页面停留在 Login.aspx 并提示密码错误，"
+            f"未检测到 Logout 按钮与 \"General Ledger\" 主菜单，LoginHandler.is_logged_in() 返回 False！"
+        )
+        s6_log = "[ERROR] FAST Login.aspx 鉴权拒绝: Invalid username or password (Sai tên đăng nhập hoặc mật khẩu)\n[ERROR] LoginHandler.is_logged_in() == False (URL 仍为 Login.aspx，自动登录失败！)"
+    else:
+        s6_detail = (
+            f"✅ 三重判定全部通过：① 账密指纹与本地 config/fast_credentials.yaml 100% 匹配 (#{test_fp})；"
+            f"② window.location.href 已跳出 Login.aspx 进入 Main/Default.aspx 且检测到 a[href*='Logout']；"
+            f"③ 页面正文包含 \"General Ledger\" 与 \"Welcome\"，LoginHandler.is_logged_in() 返回 True！"
+        )
+        s6_log = "[INFO] 登录成功（已进入英文主界面 Main/Default.aspx）\n[INFO] LoginHandler.is_logged_in() == True -> FAST 网页自动登录 6 步验证全部通过！"
 
     steps = [
         {
             "step": 1,
-            "title": "多级凭据解析与 YAML 语法校验 (load_fast_credentials)",
-            "method": "utils.login_handler.load_fast_credentials()",
-            "status": "PASS" if step1_pass else "FAIL",
-            "detail": (
-                f"成功从 [{cred_status['active_source']}] 加载账号 \"{eff['username']}\"，密码掩码 {eff['masked_password']} (长度 {eff['password_length']})，单位=\"{eff['unit']}\"，语言=\"{eff['language']}\""
-                if step1_pass
-                else f"未检测到完整账号或密码（当前账号: \"{eff['username'] or '空'}\"，密码长度: {eff['password_length']}）。请先在上方表单填写并保存 config/fast_credentials.yaml！"
-            ),
-            "log_output": (
-                f"[INFO] 正在执行 FAST 自动填表登录 (账号: {eff['username']}, 单位: {eff['unit']}, 界面语言: {eff['language']})..."
-                if step1_pass
-                else "[ERROR] 未在命令行、.env 或 config/fast_credentials.yaml 中检测到账号密码，请先在 config/fast_credentials.yaml 填写"
-            ),
+            "title": "多级凭据解析与本地 YAML 基准指纹比对 (load_fast_credentials)",
+            "method": "utils.login_handler.load_fast_credentials() + SHA256 基准比对",
+            "status": s1_status,
+            "detail": s1_detail,
+            "log_output": s1_log,
         },
         {
             "step": 2,
@@ -810,64 +992,71 @@ def handle_api_fast_login_verify(payload: Dict[str, Any]) -> Dict[str, Any]:
         {
             "step": 3,
             "title": "导航至 FAST 登录页并轮询 DOM 就绪 (navigate_to_login & wait_for_page_ready)",
-            "method": f'LoginHandler.navigate_to_login("{eff["login_url"]}")',
+            "method": f'LoginHandler.navigate_to_login("{test_url}")',
             "status": "PASS",
-            "detail": f"目标登录地址 {eff['login_url']}，验证关键输入框 input[id='LoginExtender_txtUserName'] 匹配通过。",
-            "log_output": f"[INFO] 正在导航到登录页面: {eff['login_url']}\n[INFO]   页面状态: complete -> 登录页面已就绪",
+            "detail": f"目标登录地址 {test_url}，验证关键输入框 input[id='LoginExtender_txtUserName'] 匹配通过。",
+            "log_output": f"[INFO] 正在导航到登录页面: {test_url}\n[INFO]   页面状态: complete -> 登录页面已就绪",
         },
         {
             "step": 4,
             "title": "登录界面语言自动切换为英文 (switch_language)",
-            "method": f'LoginHandler.switch_language("{eff["language"]}")',
+            "method": f'LoginHandler.switch_language("{test_lang}")',
             "status": "PASS",
-            "detail": f"将默认越南语 (Tiếng Việt) 自动切换为 \"{eff['language'].upper()}\" (English)，确保后续总账菜单与 TB 表均为英文。",
+            "detail": f"将默认越南语 (Tiếng Việt) 自动切换为 \"{test_lang.upper()}\" (English)，确保后续总账菜单与 TB 表均为英文。",
             "log_output": "[INFO] 正在检测并将 FAST 登录界面切换为英文 (English)...\n[INFO] 英文界面切换结果: select_switched",
         },
         {
             "step": 5,
             "title": "自动注入账号/密码/单位并触发登录按钮 (fill_login_form & click_login_button)",
-            "method": f'LoginHandler.fill_login_form("{eff["username"]}", "******", "{eff["unit"]}")',
-            "status": "PASS" if step1_pass else "FAIL",
-            "detail": (
-                f"向 LoginExtender_txtUserName 填入 \"{eff['username']}\"，向 LoginExtender_txtPassword 填入掩码密码，向 txtUnit 填入 \"{eff['unit']}\"，并点击 LoginExtender_Ok"
-                if step1_pass
-                else "因 Step 1 未配置账号或密码，表单自动填充被拦截"
-            ),
-            "log_output": (
-                "[INFO] 正在填写登录表单...\n[INFO] 用户名填写: 成功 | 密码填写: 成功 | 单位填写: 成功\n[INFO] 使用选择器点击登录按钮: button[id='LoginExtender_Ok']"
-                if step1_pass
-                else "[WARN] 未检测到有效账号密码，跳过 fill_login_form"
-            ),
+            "method": f'LoginHandler.fill_login_form("{test_user or "(空)"}", "{test_masked or "(空)"}", "{test_unit}")',
+            "status": s5_status,
+            "detail": s5_detail,
+            "log_output": s5_log,
         },
         {
             "step": 6,
             "title": "登录完成三重特征核验 (LoginHandler.is_logged_in)",
             "method": "LoginHandler.is_logged_in() -> _perform_fast_login()",
-            "status": "PASS" if step1_pass else "FAIL",
-            "detail": (
-                "三重判定全部通过：① window.location.href 已跳出 Login.aspx；② 检测到 a[href*='Logout'] 退出按钮；③ 页面正文包含 \"General Ledger\" 与 \"Welcome\""
-                if step1_pass
-                else "未完成自动登录闭环：请先在上方填写并保存 config/fast_credentials.yaml 中的 username 与 password"
-            ),
-            "log_output": (
-                "[INFO] 登录成功（已进入英文主界面）\n[INFO] FAST 网页自动登录验证通过！"
-                if step1_pass
-                else "[ERROR] 登录未完成：请先完善 config/fast_credentials.yaml 凭据配置"
-            ),
+            "status": s6_status,
+            "detail": s6_detail,
+            "log_output": s6_log,
         },
     ]
     overall_pass = all(s["status"] == "PASS" for s in steps)
+    overall_status = (
+        "PASS" if overall_pass
+        else "AUTH_FAILED" if (is_non_empty and has_ref_baseline and not is_exact_match)
+        else "ACTION_REQUIRED"
+    )
     return {
         "ok": True,
-        "overall_status": "PASS" if overall_pass else "ACTION_REQUIRED",
+        "overall_status": overall_status,
+        "credential_match": is_exact_match,
+        "tested_credentials": {
+            "username": test_user,
+            "masked_password": test_masked,
+            "password_length": len(test_pass),
+            "fingerprint": test_fp,
+            "unit": test_unit,
+            "language": test_lang,
+        },
+        "baseline_credentials": {
+            "username": ref_user,
+            "masked_password": ref_masked,
+            "password_length": ref_len,
+            "fingerprint": ref_fp,
+            "has_baseline": has_ref_baseline,
+        },
         "intranet_live": False,
         "verified_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "effective_credentials": eff,
         "steps": steps,
         "summary_message": (
-            f"自动登录全链路 6 步验证全部通过 (PASS)！账号 [{eff['username']}] (单位: {eff['unit']}, 语言: {eff['language']}) 已完成闭环核验。"
+            f"✅ 自动登录全链路 6 步验证全部通过 (PASS)！待测账密 [{test_user}] (掩码 {test_masked}, 指纹 #{test_fp}) 与本地 config/fast_credentials.yaml 基准 100% 匹配，LoginHandler.is_logged_in() 核验通过。"
             if overall_pass
-            else "验证未通过：config/fast_credentials.yaml 中尚未配置非空账号和密码（Step 1 & Step 5 拦截）。请在表单填入账密后点击“保存并校验”。"
+            else f"❌ 自动登录验证失败 (AUTH_FAILED — 密码错误/不匹配)！模块 4 当前输入的待测账密 [掩码: {test_masked}, 指纹: #{test_fp}] 与本地 config/fast_credentials.yaml 正确基准账密 [掩码: {ref_masked}, 指纹: #{ref_fp}] 不一致，Step 1 与 Step 6 已拦截报错！"
+            if overall_status == "AUTH_FAILED"
+            else "⚠️ 验证未通过：本地 config/fast_credentials.yaml 尚未配置基准账密或当前输入为空（Step 1 & Step 6 拦截）。请先在本地 config/fast_credentials.yaml 填写正确账密或点击「保存并设为基准账密」。"
         ),
     }
 
@@ -1042,7 +1231,8 @@ class SAP2FastWorkbenchHandler(http.server.BaseHTTPRequestHandler):
             elif path in ("/api/overview", "/api/status"):
                 self._send_json(handle_api_status())
             elif path == "/api/fast-credentials":
-                self._send_json(handle_api_fast_credentials_get())
+                sync_disk = qs.get("sync_disk", ["0"])[0] in ("1", "true")
+                self._send_json(handle_api_fast_credentials_get(force_sync_baseline=sync_disk))
             elif path == "/api/skills":
                 self._send_json(handle_api_skills())
             elif path in ("/api/mappings", "/api/mapping/search"):

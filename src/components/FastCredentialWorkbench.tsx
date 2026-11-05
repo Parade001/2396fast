@@ -1,5 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Eye, EyeOff, Download, Save, Play, CheckCircle2, AlertTriangle, XCircle, Copy, Terminal } from 'lucide-react';
+import {
+  Eye,
+  EyeOff,
+  Download,
+  Save,
+  Play,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Copy,
+  Terminal,
+  RefreshCw,
+  ShieldAlert,
+  Lock,
+} from 'lucide-react';
 
 export interface FastCredentialStatus {
   ok: boolean;
@@ -15,8 +29,18 @@ export interface FastCredentialStatus {
     has_password: boolean;
     password_length: number;
     masked_password: string;
+    fingerprint?: string;
     unit: string;
     language: string;
+  };
+  baseline_lock?: {
+    locked: boolean;
+    username: string;
+    masked_password: string;
+    password_length: number;
+    fingerprint: string;
+    locked_at: string;
+    source: string;
   };
   priority_chain: Array<{
     rank: number;
@@ -26,6 +50,7 @@ export interface FastCredentialStatus {
     has_password: boolean;
     password_length?: number;
     masked_password?: string;
+    fingerprint?: string;
   }>;
   config_data: {
     fast_auth: {
@@ -58,7 +83,23 @@ interface VerifyStepResult {
 
 interface VerifyPipelineResponse {
   ok: boolean;
-  overall_status: 'PASS' | 'ACTION_REQUIRED';
+  overall_status: 'PASS' | 'AUTH_FAILED' | 'ACTION_REQUIRED';
+  credential_match?: boolean;
+  tested_credentials?: {
+    username: string;
+    masked_password: string;
+    password_length: number;
+    fingerprint: string;
+    unit: string;
+    language: string;
+  };
+  baseline_credentials?: {
+    username: string;
+    masked_password: string;
+    password_length: number;
+    fingerprint: string;
+    has_baseline: boolean;
+  };
   intranet_live: boolean;
   verified_at: string;
   summary_message: string;
@@ -80,8 +121,9 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
   const [verifying, setVerifying] = useState(false);
   const [showPlainPassword, setShowPlainPassword] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
+  const [forceUpdateBaseline, setForceUpdateBaseline] = useState(false);
 
-  // Editable form state for config/fast_credentials.yaml
+  // Editable form state for Module 4
   const [loginUrl, setLoginUrl] = useState('http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -93,10 +135,11 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
   const [verifyResult, setVerifyResult] = useState<VerifyPipelineResponse | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'pass' | 'warn' | 'err' } | null>(null);
 
-  const fetchCredentialStatus = async () => {
+  const fetchCredentialStatus = async (syncDisk = false) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/fast-credentials');
+      const url = syncDisk ? '/api/fast-credentials?sync_disk=1' : '/api/fast-credentials';
+      const res = await fetch(url);
       const data: FastCredentialStatus = await res.json();
       if (data.ok) {
         setCredStatus(data);
@@ -109,6 +152,12 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
         setLanguage(fa.language || 'en');
         setChromePath(cd.chrome_path || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
         setCdpPort(cd.remote_debugging_port || 9222);
+        if (syncDisk) {
+          setFeedbackMsg({
+            text: `已从本地磁盘重新加载 config/fast_credentials.yaml (当前基准账号: ${data.effective.username || '未配置'}, 指纹: #${data.effective.fingerprint || '空'})`,
+            type: data.is_ready_for_auto_login ? 'pass' : 'warn',
+          });
+        }
       }
     } catch (err: any) {
       setFeedbackMsg({ text: `读取凭据配置失败: ${err?.message || String(err)}`, type: 'err' });
@@ -121,10 +170,54 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
     fetchCredentialStatus();
   }, []);
 
-  const handleSaveCredentials = async (overrideUser?: string, overridePass?: string) => {
+  const handleRunLoginVerify = async (overrideUser?: string, overridePass?: string) => {
+    setVerifying(true);
+    const targetUser = overrideUser !== undefined ? overrideUser : username;
+    const targetPass = overridePass !== undefined ? overridePass : password;
+
+    try {
+      const res = await fetch('/api/fast-login-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          test_username: targetUser,
+          test_password: targetPass,
+          test_unit: unit,
+          test_language: language,
+          test_login_url: loginUrl,
+        }),
+      });
+      const data: VerifyPipelineResponse = await res.json();
+      if (data.ok) {
+        setVerifyResult(data);
+        const bannerType: 'pass' | 'warn' | 'err' =
+          data.overall_status === 'PASS'
+            ? 'pass'
+            : data.overall_status === 'AUTH_FAILED'
+              ? 'err'
+              : 'warn';
+        setFeedbackMsg({
+          text: data.summary_message,
+          type: bannerType,
+        });
+        onGlobalBannerUpdate(`[FAST 自动登录验证] ${data.summary_message}`, bannerType);
+      }
+    } catch (err: any) {
+      setFeedbackMsg({ text: `自动登录验证执行失败: ${err?.message || String(err)}`, type: 'err' });
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleSaveCredentials = async (
+    overrideUser?: string,
+    overridePass?: string,
+    overrideForceBaseline?: boolean
+  ) => {
     setSaving(true);
     const targetUser = overrideUser !== undefined ? overrideUser : username;
     const targetPass = overridePass !== undefined ? overridePass : password;
+    const useForce = overrideForceBaseline !== undefined ? overrideForceBaseline : forceUpdateBaseline;
 
     try {
       const res = await fetch('/api/fast-credentials', {
@@ -138,20 +231,26 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
           language,
           chrome_path: chromePath,
           remote_debugging_port: Number(cdpPort),
+          force_update_baseline: useForce,
         }),
       });
       const data = await res.json();
       if (data.ok) {
         setCredStatus(data);
+        setForceUpdateBaseline(false);
         const isReady = Boolean(data.is_ready_for_auto_login);
         const msg = data.message || '已保存 config/fast_credentials.yaml';
         setFeedbackMsg({ text: msg, type: isReady ? 'pass' : 'warn' });
         onGlobalBannerUpdate(msg, isReady ? 'pass' : 'warn');
         onStatusRefresh?.();
-        // Automatically run 6-step verification right after saving
-        await handleRunLoginVerify();
+        await handleRunLoginVerify(targetUser, targetPass);
       } else {
-        setFeedbackMsg({ text: data.detail || '保存失败', type: 'err' });
+        // Blocked by baseline lock (e.g., user typed a wrong password in Module 4 and clicked Save without force_update_baseline)
+        const errMsg = data.detail || '保存被基准账密保护锁拦截';
+        setFeedbackMsg({ text: errMsg, type: 'err' });
+        onGlobalBannerUpdate(errMsg, 'err');
+        // Immediately run 6-step verify with the wrong password so Step 1 & Step 6 show red FAIL
+        await handleRunLoginVerify(targetUser, targetPass);
       }
     } catch (err: any) {
       setFeedbackMsg({ text: `保存异常: ${err?.message || String(err)}`, type: 'err' });
@@ -160,42 +259,41 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
     }
   };
 
-  const handleQuickFillDemo = async () => {
+  const handleQuickFillDemoPass = async () => {
     const demoUser = 'FIN_ADMIN_VN';
     const demoPass = 'Fast@2026#Timber';
     setUsername(demoUser);
     setPassword(demoPass);
     setUnit('CTY');
     setLanguage('en');
-    await handleSaveCredentials(demoUser, demoPass);
+    await handleSaveCredentials(demoUser, demoPass, true);
   };
 
-  const handleRunLoginVerify = async () => {
-    setVerifying(true);
-    try {
-      const res = await fetch('/api/fast-login-verify', {
+  const handleSimulateWrongPasswordTest = async () => {
+    // Ensure a baseline exists first; if not, seed the baseline, then test with a wrong password
+    const hasBase = Boolean(credStatus?.baseline_lock?.locked && credStatus?.baseline_lock?.fingerprint);
+    const baseUser = hasBase ? credStatus!.baseline_lock!.username : 'FIN_ADMIN_VN';
+    if (!hasBase) {
+      await fetch('/api/fast-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ simulate_intranet: true }),
+        body: JSON.stringify({
+          login_url: loginUrl,
+          username: 'FIN_ADMIN_VN',
+          password: 'Fast@2026#Timber',
+          unit: 'CTY',
+          language: 'en',
+          chrome_path: chromePath,
+          remote_debugging_port: Number(cdpPort),
+          force_update_baseline: true,
+        }),
       });
-      const data: VerifyPipelineResponse = await res.json();
-      if (data.ok) {
-        setVerifyResult(data);
-        const isPass = data.overall_status === 'PASS';
-        setFeedbackMsg({
-          text: data.summary_message,
-          type: isPass ? 'pass' : 'warn',
-        });
-        onGlobalBannerUpdate(
-          `[FAST 自动登录验证] ${data.summary_message}`,
-          isPass ? 'pass' : 'warn'
-        );
-      }
-    } catch (err: any) {
-      setFeedbackMsg({ text: `自动登录验证执行失败: ${err?.message || String(err)}`, type: 'err' });
-    } finally {
-      setVerifying(false);
+      await fetchCredentialStatus();
     }
+    const wrongPass = 'WrongPass_999999!';
+    setUsername(baseUser);
+    setPassword(wrongPass);
+    await handleRunLoginVerify(baseUser, wrongPass);
   };
 
   const handleDownloadYaml = () => {
@@ -222,34 +320,55 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
     setTimeout(() => setCopiedCmd(false), 2000);
   };
 
+  const baselineInfo = credStatus?.baseline_lock;
+
   return (
     <div className="card" style={{ borderColor: '#cbd5e1' }}>
       <div className="card-header">
         <div>
           <h2 className="card-title">
-            方案 A 专享：config/fast_credentials.yaml 交互式凭据管理与 FAST 自动登录 6 步验证台
+            方案 A 专享：config/fast_credentials.yaml 基准指纹校验器与 FAST 自动登录 6 步真实验证台
           </h2>
           <p className="card-desc">
-            支持在线编辑并保存至 config/fast_credentials.yaml、导出最新 YAML 配置文件、密码掩码脱敏与语法核验，以及一键检验 LoginHandler 自动填表登录全链路
+            将模块 4 输入框中的待测账密与本地磁盘 config/fast_credentials.yaml 基准指纹 (SHA-256) 严格比对：输入错误密码点击验证或未授权保存均会精准拦截并报错 (AUTH_FAILED)
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={handleQuickFillDemo}
+            onClick={() => fetchCredentialStatus(true)}
+            disabled={loading || saving || verifying}
+            title="当您在本地编辑器修改了 config/fast_credentials.yaml 后，点击此按钮重新读取磁盘基准"
+          >
+            <RefreshCw size={13} />
+            从本地 YAML 重新加载基准
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={handleQuickFillDemoPass}
             disabled={saving || verifying}
           >
-            一键填入测试账密并验证 (FIN_ADMIN_VN)
+            1. 写入正确基准账密并验证 (PASS)
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={handleSimulateWrongPasswordTest}
+            disabled={saving || verifying}
+          >
+            <ShieldAlert size={13} />
+            2. 故意输入错误密码测试拦截 (FAIL)
           </button>
           <button
             type="button"
             className="btn btn-primary"
-            onClick={handleRunLoginVerify}
+            onClick={() => handleRunLoginVerify()}
             disabled={verifying}
           >
             <Play size={14} />
-            {verifying ? '正在执行 6 步验证...' : '运行 FAST 自动登录 6 步验证'}
+            {verifying ? '正在核验输入账密...' : '校验当前输入账密 (6步登录测试)'}
           </button>
         </div>
       </div>
@@ -260,43 +379,81 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
       ) : credStatus ? (
         <div className={`status-banner ${credStatus.is_ready_for_auto_login ? 'pass' : 'warn'}`}>
           {credStatus.is_ready_for_auto_login
-            ? `[凭据校验已就绪 PASS] 当前生效来源: ${credStatus.active_source} · 账号: ${credStatus.effective.username} · 密码掩码: ${credStatus.effective.masked_password} (长度 ${credStatus.effective.password_length} 位) · 单位: ${credStatus.effective.unit} · 语言: ${credStatus.effective.language}`
-            : `[待填写账号密码] config/fast_credentials.yaml 语法校验通过，但当前 username 或 password 为空。请在下方填入您的 FAST 账号密码并点击“保存并校验凭据配置”或点击右上角“一键填入测试账密并验证”。`}
+            ? `[本地 YAML 基准已锁定 PASS] 来源: ${credStatus.active_source} · 基准账号: ${credStatus.effective.username} · 密码掩码: ${credStatus.effective.masked_password} (${credStatus.effective.password_length}位) · SHA-256 指纹: #${credStatus.effective.fingerprint}`
+            : `[待填写基准账号密码] 本地 config/fast_credentials.yaml 当前账号或密码为空。请先在本地 YAML 文件填写，或在下方勾选写入基准账密。`}
         </div>
       ) : null}
 
       <div className="grid-2" style={{ marginBottom: '16px' }}>
-        {/* Left column: Online YAML Editor */}
+        {/* Left column: Interactive Credential Input & Baseline Lock Control */}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: '6px', padding: '14px 16px', background: '#f8fafc' }}>
           <div className="flex items-center justify-between mb-3">
             <div>
               <h3 style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a' }}>
-                在线编辑 config/fast_credentials.yaml
+                模块 4 待测账密输入 &amp; config/fast_credentials.yaml 编辑器
               </h3>
               <p style={{ fontSize: '12px', color: '#475569' }}>
-                修改后点击保存将直接写入磁盘文件，或点击下载导出 YAML
+                在此输入任意账号/密码并点击「校验当前输入账密」，系统将与本地 YAML 正确基准做严格比对
               </p>
             </div>
-            <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: credStatus?.yaml_syntax_valid ? '#166534' : '#991b1b', fontWeight: 700 }}>
-              {credStatus?.yaml_syntax_valid ? 'YAML 语法合法 · PASS' : 'YAML 语法错误'}
+            <span
+              style={{
+                fontSize: '12px',
+                fontFamily: 'var(--font-mono)',
+                color: baselineInfo?.locked ? '#166534' : '#b45309',
+                fontWeight: 700,
+              }}
+            >
+              {baselineInfo?.locked
+                ? `基准锁已启用 (#${baselineInfo.fingerprint})`
+                : '尚未建立基准锁'}
             </span>
+          </div>
+
+          {/* Baseline Lock Status Strip */}
+          <div
+            style={{
+              background: baselineInfo?.locked ? '#eff6ff' : '#fffbeb',
+              border: `1px solid ${baselineInfo?.locked ? '#bfdbfe' : '#fde68a'}`,
+              borderRadius: '4px',
+              padding: '8px 10px',
+              marginBottom: '12px',
+              fontSize: '12px',
+              color: '#1e293b',
+            }}
+          >
+            <div className="flex items-center justify-between flex-wrap gap-1">
+              <span className="inline-flex items-center gap-1 font-semibold">
+                <Lock size={13} />
+                本地 config/fast_credentials.yaml 权威基准账密：
+              </span>
+              {baselineInfo?.locked ? (
+                <span className="mono" style={{ color: '#0f4c81', fontWeight: 700 }}>
+                  账号={baselineInfo.username} | 掩码={baselineInfo.masked_password} ({baselineInfo.password_length}位) | 指纹=#{baselineInfo.fingerprint}
+                </span>
+              ) : (
+                <span style={{ color: '#b45309' }}>
+                  当前磁盘 YAML 尚未配置密码（点击上方「1. 写入正确基准账密」或在本地编辑 YAML 后点击重新加载）
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="form-row">
             <div className="field" style={{ flex: '1 1 200px' }}>
-              <label htmlFor="fc-username">FAST 登录账号 (fast_auth.username)</label>
+              <label htmlFor="fc-username">待测 / 配置 FAST 登录账号 (username)</label>
               <input
                 id="fc-username"
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="如 ADMIN 或 FIN_USER01"
+                placeholder="如 ADMIN 或 FIN_ADMIN_VN"
               />
             </div>
 
             <div className="field" style={{ flex: '1 1 220px' }}>
               <label htmlFor="fc-password">
-                FAST 登录密码 (fast_auth.password)
+                待测 / 配置 FAST 登录密码 (password)
               </label>
               <div className="flex items-center gap-1">
                 <input
@@ -304,7 +461,7 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
                   type={showPlainPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="请输入越南 FAST 登录密码"
+                  placeholder="故意输入错误密码可测试拦截"
                   style={{ flex: 1 }}
                 />
                 <button
@@ -367,15 +524,44 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
             </div>
           </div>
 
+          {/* Baseline protection lock checkbox */}
+          <div style={{ marginBottom: '12px' }}>
+            <label
+              className="check-inline"
+              style={{
+                fontSize: '12px',
+                color: forceUpdateBaseline ? '#991b1b' : '#334155',
+                fontWeight: forceUpdateBaseline ? 700 : 500,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={forceUpdateBaseline}
+                onChange={(e) => setForceUpdateBaseline(e.target.checked)}
+              />
+              允许覆写本地 YAML 基准账密锁 (--force-update-baseline)：仅当您确实需要修改真实正确密码时勾选；未勾选时若输入错误密码点保存将被自动拦截
+            </label>
+          </div>
+
           <div className="form-row" style={{ marginBottom: 0 }}>
             <button
               type="button"
               className="btn btn-primary"
+              onClick={() => handleRunLoginVerify()}
+              disabled={verifying}
+            >
+              <Play size={14} />
+              {verifying ? '校验中...' : '仅测试当前输入账密 (不改 YAML)'}
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-secondary"
               onClick={() => handleSaveCredentials()}
               disabled={saving}
             >
               <Save size={14} />
-              {saving ? '保存中...' : '保存并校验 config/fast_credentials.yaml'}
+              {saving ? '保存中...' : '保存至 fast_credentials.yaml'}
             </button>
 
             <button
@@ -384,17 +570,17 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
               onClick={handleDownloadYaml}
             >
               <Download size={14} />
-              下载 fast_credentials.yaml
+              下载 YAML
             </button>
           </div>
         </div>
 
-        {/* Right column: Multi-Tier Priority & Effective Masked State */}
+        {/* Right column: Multi-Tier Priority & Fingerprint Comparison Table */}
         <div style={{ border: '1px solid #e2e8f0', borderRadius: '6px', padding: '14px 16px', background: '#ffffff' }}>
           <div className="flex items-center justify-between mb-3">
             <div>
               <h3 style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a' }}>
-                多级凭据加载优先级与掩码状态核验表 (load_fast_credentials)
+                多级凭据加载优先级与 SHA-256 指纹核验表 (load_fast_credentials)
               </h3>
               <p style={{ fontSize: '12px', color: '#475569' }}>
                 优先级顺序：CLI 参数 &gt; .env 环境变量 &gt; config/fast_credentials.yaml &gt; config/account.yaml
@@ -409,7 +595,7 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
                   <th>优先级</th>
                   <th>配置来源</th>
                   <th>解析账号</th>
-                  <th>密码掩码状态</th>
+                  <th>密码掩码与指纹</th>
                   <th>当前状态</th>
                 </tr>
               </thead>
@@ -421,7 +607,7 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
                     <td className="mono">{item.username}</td>
                     <td className="mono">
                       {item.has_password
-                        ? `${item.masked_password || '••••••'} (${item.password_length || 6}位)`
+                        ? `${item.masked_password || '••••••'} (${item.password_length || 6}位)${item.fingerprint ? ` · #${item.fingerprint}` : ''}`
                         : '未设置'}
                     </td>
                     <td>
@@ -440,6 +626,34 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
               </tbody>
             </table>
           </div>
+
+          {/* Live Comparison Card when Verify has been run */}
+          {verifyResult?.tested_credentials && verifyResult?.baseline_credentials && (
+            <div
+              style={{
+                border: `1px solid ${verifyResult.credential_match ? '#86efac' : '#fca5a5'}`,
+                background: verifyResult.credential_match ? '#f0fdf4' : '#fef2f2',
+                borderRadius: '4px',
+                padding: '9px 12px',
+                marginBottom: '12px',
+                fontSize: '12px',
+              }}
+            >
+              <div style={{ fontWeight: 700, color: verifyResult.credential_match ? '#166534' : '#991b1b', marginBottom: '4px' }}>
+                {verifyResult.credential_match
+                  ? '✅ 待测账密 vs 本地 YAML 基准账密比对结果：100% 匹配 (PASS)'
+                  : '❌ 待测账密 vs 本地 YAML 基准账密比对结果：密码或账号不匹配 (AUTH_FAILED — 已拦截)'}
+              </div>
+              <div className="mono" style={{ color: '#1e293b', fontSize: '11.5px' }}>
+                <div>
+                  • 本地 YAML 正确基准：账号=&quot;{verifyResult.baseline_credentials.username || '空'}&quot; | 掩码={verifyResult.baseline_credentials.masked_password || '空'} ({verifyResult.baseline_credentials.password_length}位) | 指纹=#{verifyResult.baseline_credentials.fingerprint || '空'}
+                </div>
+                <div>
+                  • 模块 4 当前输入待测：账号=&quot;{verifyResult.tested_credentials.username || '空'}&quot; | 掩码={verifyResult.tested_credentials.masked_password || '空'} ({verifyResult.tested_credentials.password_length}位) | 指纹=#{verifyResult.tested_credentials.fingerprint || '空'}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Local terminal 1-liner verification command */}
           <div style={{ background: '#0f172a', color: '#e2e8f0', padding: '10px 12px', borderRadius: '4px' }}>
@@ -483,15 +697,19 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
               FAST 网页自动登录 6 步全链路核验流水线 (LoginHandler.login &amp; is_logged_in)
             </h3>
             <p style={{ fontSize: '12px', color: '#475569' }}>
-              点击上方“运行 FAST 自动登录 6 步验证”或保存凭据后，系统将逐项验证凭据读取、语言切换、DOM 表单注入与登录成功三重断言
+              只有当模块 4 输入的账密与本地 config/fast_credentials.yaml 正确基准指纹完全一致（或内网实连鉴权通过）时，Step 1 与 Step 6 才会通过 (PASS)
             </p>
           </div>
           {verifyResult && (
             <span
               className={
-                verifyResult.overall_status === 'PASS' ? 'status-text-pass' : 'status-text-warn'
+                verifyResult.overall_status === 'PASS'
+                  ? 'status-text-pass'
+                  : verifyResult.overall_status === 'AUTH_FAILED'
+                    ? 'status-text-fail'
+                    : 'status-text-warn'
               }
-              style={{ fontSize: '13px' }}
+              style={{ fontSize: '13px', fontWeight: 700 }}
             >
               验证时间: {verifyResult.verified_at} · 综合结论: {verifyResult.overall_status}
             </span>
@@ -500,7 +718,7 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
 
         {!verifyResult ? (
           <div className="sql-box">
-            点击右上角「运行 FAST 自动登录 6 步验证」或「一键填入测试账密并验证 (FIN_ADMIN_VN)」以查看完整 6 步验证流水线与日志回显。
+            点击右上角「校验当前输入账密 (6步登录测试)」或「2. 故意输入错误密码测试拦截 (FAIL)」，查看真实密码比对与 6 步自动登录核验结果。
           </div>
         ) : (
           <div className="table-wrap">
@@ -549,7 +767,7 @@ export const FastCredentialWorkbench: React.FC<Props> = ({
                           fontFamily: 'var(--font-mono)',
                           fontSize: '11.5px',
                           background: '#0f172a',
-                          color: '#a7f3d0',
+                          color: s.status === 'FAIL' ? '#fca5a5' : '#a7f3d0',
                           padding: '4px 8px',
                           borderRadius: '4px',
                           whiteSpace: 'pre-wrap',

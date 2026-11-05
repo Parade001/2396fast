@@ -26,6 +26,7 @@
 ================================================================================
 """
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -40,6 +41,15 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+
+def compute_credential_fingerprint(username: str, password: str, unit: str = "CTY") -> str:
+    """计算 FAST 登录凭据 (username:password) 的 12 位 SHA-256 指纹摘要（不暴露明文密码，与 server.ts / app.py 完全一致）。"""
+    u = str(username or "").strip()
+    p = str(password or "")
+    if not u and not p:
+        return ""
+    return hashlib.sha256(f"{u}:{p}".encode("utf-8")).hexdigest()[:12]
 
 
 def _parse_yaml_with_fallback(text: str) -> Dict[str, Any]:
@@ -127,15 +137,69 @@ def load_fast_credentials(config_dir: Optional[str] = None) -> Dict[str, Any]:
         or acc_chrome.get("fast_language")
         or "en"
     )
+    uname_str = str(username).strip()
+    pwd_str = str(password)
+    unit_str = str(unit).strip() or "CTY"
     return {
         "login_url": str(login_url).strip(),
-        "username": str(username).strip(),
-        "password": str(password),
-        "unit": str(unit).strip() or "CTY",
+        "username": uname_str,
+        "password": pwd_str,
+        "unit": unit_str,
         "language": str(language).strip().lower() or "en",
+        "fingerprint": compute_credential_fingerprint(uname_str, pwd_str, unit_str),
         "chrome_cdp": chrome_cdp,
         "selectors": selectors,
         "credential_file": str(cred_yaml_path),
+    }
+
+
+def verify_fast_credentials(
+    test_username: Optional[str] = None,
+    test_password: Optional[str] = None,
+    config_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    对候选账号密码与本地 `config/fast_credentials.yaml` 基准凭据进行 SHA-256 指纹比对校验：
+    - 若未传入 test_username / test_password，则直接校验本地 YAML 是否已配置非空账号密码；
+    - 若传入了候选账号密码（如模块 4 交互输入框），则严格比对 SHA-256 指纹是否与本地基准一致，
+      不一致时立即返回 `AUTH_FAILED` 并拒绝通过。
+    """
+    baseline = load_fast_credentials(config_dir=config_dir)
+    ref_user = baseline.get("username", "")
+    ref_pwd = baseline.get("password", "")
+    ref_unit = baseline.get("unit", "CTY")
+    ref_fp = baseline.get("fingerprint", "")
+
+    cand_user = str(test_username).strip() if test_username is not None else ref_user
+    cand_pwd = str(test_password) if test_password is not None else ref_pwd
+    cand_fp = compute_credential_fingerprint(cand_user, cand_pwd, ref_unit)
+
+    if not ref_user or not ref_pwd:
+        return {
+            "ok": False,
+            "overall_status": "CREDENTIALS_MISSING",
+            "credential_match": False,
+            "baseline_username": ref_user,
+            "baseline_fingerprint": ref_fp,
+            "tested_username": cand_user,
+            "tested_fingerprint": cand_fp,
+            "reason": "本地 config/fast_credentials.yaml 尚未配置基准账号或密码",
+        }
+
+    is_match = bool(cand_user and cand_pwd and cand_user == ref_user and cand_fp == ref_fp)
+    return {
+        "ok": is_match,
+        "overall_status": "PASS" if is_match else "AUTH_FAILED",
+        "credential_match": is_match,
+        "baseline_username": ref_user,
+        "baseline_fingerprint": ref_fp,
+        "tested_username": cand_user,
+        "tested_fingerprint": cand_fp,
+        "reason": (
+            f"验证通过：测试输入与本地基准完全匹配 (SHA-256 #{cand_fp})"
+            if is_match
+            else f"认证失败 (AUTH_FAILED)：测试输入 (user={cand_user}, fp=#{cand_fp or 'EMPTY'}) 与本地 YAML 基准 (user={ref_user}, fp=#{ref_fp}) 不匹配"
+        ),
     }
 
 
