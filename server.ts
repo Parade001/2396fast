@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import * as XLSX from 'xlsx';
 import http from 'http';
 import crypto from 'crypto';
+import { execFile } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -99,21 +100,6 @@ export interface FastCredentialsData {
   };
 }
 
-export const BASELINE_LOCK_PATH = '/tmp/.sap2fast_auth_baseline.json';
-
-export interface AuthBaselineLock {
-  username: string;
-  password: string;
-  masked_password: string;
-  password_length: number;
-  fingerprint: string;
-  unit: string;
-  language: string;
-  yaml_mtime_ms: number;
-  locked_at: string;
-  source: string;
-}
-
 export function maskPasswordStr(pwd: string): string {
   if (!pwd) return '';
   if (pwd.length <= 2) return '*'.repeat(pwd.length);
@@ -127,51 +113,7 @@ export function computeCredentialFingerprint(username: string, password: string)
   return crypto.createHash('sha256').update(`${u}:${p}`, 'utf-8').digest('hex').slice(0, 12);
 }
 
-export function loadOrSyncAuthBaseline(
-  yamlUser: string,
-  yamlPass: string,
-  yamlUnit: string,
-  yamlLang: string,
-  yamlMtimeMs: number,
-  forceResetFromYaml = false
-): AuthBaselineLock | null {
-  let existing: AuthBaselineLock | null = null;
-  if (fs.existsSync(BASELINE_LOCK_PATH)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(BASELINE_LOCK_PATH, 'utf-8')) as AuthBaselineLock;
-    } catch {
-      existing = null;
-    }
-  }
-
-  // If the user edited config/fast_credentials.yaml on disk (has non-empty credentials and either no baseline yet or file mtime changed externally)
-  if (yamlUser && yamlPass) {
-    const mtimeChanged = !existing || Math.abs((existing.yaml_mtime_ms || 0) - yamlMtimeMs) > 50;
-    if (!existing || forceResetFromYaml || mtimeChanged) {
-      const nextLock: AuthBaselineLock = {
-        username: yamlUser,
-        password: yamlPass,
-        masked_password: maskPasswordStr(yamlPass),
-        password_length: yamlPass.length,
-        fingerprint: computeCredentialFingerprint(yamlUser, yamlPass),
-        unit: yamlUnit || 'CTY',
-        language: yamlLang || 'en',
-        yaml_mtime_ms: yamlMtimeMs,
-        locked_at: new Date().toISOString(),
-        source: 'config/fast_credentials.yaml (本地基准凭据锁)',
-      };
-      try {
-        fs.writeFileSync(BASELINE_LOCK_PATH, JSON.stringify(nextLock, null, 2), 'utf-8');
-      } catch {
-        // ignore /tmp write error
-      }
-      return nextLock;
-    }
-  }
-  return existing;
-}
-
-export function loadFastCredentialsStatus(forceSyncBaseline = false) {
+export function loadFastCredentialsStatus() {
   const credYamlPath = path.join(CONFIG_DIR, 'fast_credentials.yaml');
   const accountCfg = loadAccountConfig();
   const accChrome = accountCfg.chrome || {};
@@ -180,12 +122,10 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
   let credData: Partial<FastCredentialsData> = {};
   let yamlSyntaxValid = true;
   let yamlSyntaxError = '';
-  let yamlMtimeMs = 0;
 
   if (fs.existsSync(credYamlPath)) {
     rawYaml = fs.readFileSync(credYamlPath, 'utf-8');
     try {
-      yamlMtimeMs = fs.statSync(credYamlPath).mtimeMs;
       credData = (yaml.load(rawYaml) as Partial<FastCredentialsData>) || {};
     } catch (e: any) {
       yamlSyntaxValid = false;
@@ -228,15 +168,6 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
       : fallbackUser && fallbackPass
         ? 'config/account.yaml (chrome兜底节点)'
         : '未配置完整账密 (待填写)';
-
-  const baselineLock = loadOrSyncAuthBaseline(
-    effectiveUser,
-    effectivePass,
-    effectiveUnit,
-    effectiveLang,
-    yamlMtimeMs,
-    forceSyncBaseline
-  );
 
   const normalized: FastCredentialsData = {
     fast_auth: {
@@ -286,25 +217,6 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
       unit: effectiveUnit,
       language: effectiveLang,
     },
-    baseline_lock: baselineLock
-      ? {
-          locked: true,
-          username: baselineLock.username,
-          masked_password: baselineLock.masked_password,
-          password_length: baselineLock.password_length,
-          fingerprint: baselineLock.fingerprint,
-          locked_at: baselineLock.locked_at,
-          source: baselineLock.source,
-        }
-      : {
-          locked: false,
-          username: '',
-          masked_password: '',
-          password_length: 0,
-          fingerprint: '',
-          locked_at: '',
-          source: '尚未建立基准账密锁',
-        },
     priority_chain: [
       {
         rank: 1,
@@ -316,7 +228,7 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
       {
         rank: 2,
         source: '.env 环境变量 (FAST_USER / FAST_PASSWORD)',
-        status: envUser && envPass ? '已配置并生效' : '未配置 (跳过)',
+        status: envUser && envPass ? '已配置并生效 (待连接目标URL实测)' : '未配置 (跳过)',
         username: envUser || '-',
         has_password: Boolean(envPass),
         fingerprint: computeCredentialFingerprint(envUser, envPass),
@@ -324,7 +236,7 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
       {
         rank: 3,
         source: 'config/fast_credentials.yaml (方案 A 推荐)',
-        status: yamlUser && yamlPass ? `已配置就绪 (PASS · 指纹 #${computeCredentialFingerprint(yamlUser, yamlPass)})` : '未填写完整账号或密码',
+        status: yamlUser && yamlPass ? `已填写账密 (掩码 ${maskPasswordStr(yamlPass)} · 需点击测试真实访问目标URL校验)` : '未填写完整账号或密码',
         username: yamlUser || '(空)',
         has_password: Boolean(yamlPass),
         password_length: yamlPass.length,
@@ -341,7 +253,7 @@ export function loadFastCredentialsStatus(forceSyncBaseline = false) {
     ],
     config_data: normalized,
     raw_yaml: rawYaml,
-    cli_verify_command: `python -c "from utils.login_handler import load_fast_credentials; c = load_fast_credentials(); print('账号:', c['username'], '| 密码已配:', bool(c['password']), f'(长度:{len(c[\\'password\\'])})', '| 单位:', c['unit'], '| 语言:', c['language'])"`,
+    cli_verify_command: `python -c "from utils.login_handler import verify_fast_login_live; import json; print(json.dumps(verify_fast_login_live(), ensure_ascii=False, indent=2))"`,
   };
 }
 
@@ -938,16 +850,15 @@ async function startServer() {
   });
 
   // [GET /api/fast-credentials]
-  app.get('/api/fast-credentials', (req: Request, res: Response) => {
+  app.get('/api/fast-credentials', (_req: Request, res: Response) => {
     try {
-      const syncDisk = req.query.sync_disk === '1' || req.query.sync_disk === 'true';
-      res.json(loadFastCredentialsStatus(syncDisk));
+      res.json(loadFastCredentialsStatus());
     } catch (err: any) {
       res.status(500).json({ ok: false, detail: err?.message || String(err) });
     }
   });
 
-  // [POST /api/fast-credentials] Save updated fast_credentials.yaml (with Baseline Protection Lock)
+  // [POST /api/fast-credentials] Save updated fast_credentials.yaml
   app.post('/api/fast-credentials', (req: Request, res: Response) => {
     try {
       const statusBefore = loadFastCredentialsStatus();
@@ -956,45 +867,11 @@ async function startServer() {
 
       const newUser = String(body.username ?? current.fast_auth.username).trim();
       const newPass = String(body.password ?? current.fast_auth.password);
-      const forceUpdateBaseline = Boolean(body.force_update_baseline);
-
-      // Baseline Protection Lock: if a valid baseline already exists on disk and the submitted credentials differ without force_update_baseline
-      const baseLock = statusBefore.baseline_lock;
       const newFp = computeCredentialFingerprint(newUser, newPass);
-      if (
-        baseLock.locked &&
-        baseLock.fingerprint &&
-        newFp !== baseLock.fingerprint &&
-        !forceUpdateBaseline
-      ) {
-        const auditLogPath = path.join(LOGS_DIR, 'mapping_change_audit.log');
-        fs.appendFileSync(
-          auditLogPath,
-          JSON.stringify({
-            ts: new Date().toISOString(),
-            event: 'fast_credentials_save_blocked_by_baseline_lock',
-            submitted_user: newUser,
-            submitted_fingerprint: newFp,
-            baseline_user: baseLock.username,
-            baseline_fingerprint: baseLock.fingerprint,
-            status: 'BLOCKED_MISMATCH',
-          }) + '\n',
-          'utf-8'
-        );
-
-        return res.json({
-          ...statusBefore,
-          ok: false,
-          blocked_by_baseline_lock: true,
-          submitted_fingerprint: newFp,
-          baseline_fingerprint: baseLock.fingerprint,
-          detail: `❌ [基准账密保护锁拦截] 本地 config/fast_credentials.yaml 已锁定正确基准账密 (账号: ${baseLock.username}, 掩码: ${baseLock.masked_password}, 指纹: #${baseLock.fingerprint})，但您在模块 4 输入的账密 (账号: ${newUser || '空'}, 掩码: ${maskPasswordStr(newPass) || '空'}, 指纹: #${newFp || '空'}) 与本地 YAML 基准不一致！系统已阻止错误密码覆盖本地 YAML，且登录校验判定为 FAIL。若确实需要修改真实生产密码，请勾选「允许覆写本地 YAML 基准账密锁」后再保存。`,
-        });
-      }
 
       const updated: FastCredentialsData = {
         fast_auth: {
-          login_url: String(body.login_url ?? current.fast_auth.login_url).trim(),
+          login_url: String(body.login_url ?? current.fast_auth.login_url).trim() || 'http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx',
           username: newUser,
           password: newPass,
           unit: String(body.unit ?? current.fast_auth.unit).trim() || 'CTY',
@@ -1023,256 +900,165 @@ async function startServer() {
         username: updated.fast_auth.username,
         password_configured: Boolean(updated.fast_auth.password),
         fingerprint: newFp,
-        force_update_baseline: forceUpdateBaseline,
         unit: updated.fast_auth.unit,
         language: updated.fast_auth.language,
         login_url: updated.fast_auth.login_url,
       });
       fs.appendFileSync(auditLogPath, logEntry + '\n', 'utf-8');
 
-      // Sync baseline lock to the newly saved valid credentials
-      const freshStatus = loadFastCredentialsStatus(true);
+      const freshStatus = loadFastCredentialsStatus();
       res.json({
         ...freshStatus,
         message: freshStatus.is_ready_for_auto_login
-          ? `✅ 已成功写入 config/fast_credentials.yaml 并更新基准账密锁！账号 [${freshStatus.effective.username}] · 掩码 ${freshStatus.effective.masked_password} · 指纹 #${freshStatus.effective.fingerprint}`
-          : '已保存至 config/fast_credentials.yaml，但账号或密码仍为空，请补充完整以启用全自动登录。',
+          ? `💾 已写入 config/fast_credentials.yaml（账号: [${freshStatus.effective.username}]，掩码: ${freshStatus.effective.masked_password}）。正在真实访问目标地址 [${updated.fast_auth.login_url}] 校验该账密是否有效...`
+          : '已保存至 config/fast_credentials.yaml，但账号或密码仍为空，请补充完整后再测试登录。',
       });
     } catch (err: any) {
       res.status(500).json({ ok: false, detail: err?.message || String(err) });
     }
   });
 
-  // [POST /api/fast-login-verify] 6-Step Auto-Login Verification Pipeline with Strict Credential Match
-  app.post('/api/fast-login-verify', async (req: Request, res: Response) => {
+  // [POST /api/fast-login-verify] 6-Step Real Browser & HTTP Live Login Verification against Target URL (10.7.3.230)
+  app.post('/api/fast-login-verify', (req: Request, res: Response) => {
     try {
       const credStatus = loadFastCredentialsStatus();
       const eff = credStatus.effective;
       const cfg = credStatus.config_data;
-      const baseLock = credStatus.baseline_lock;
       const body = req.body || {};
 
-      // Read candidate credentials submitted from Module 4 input boxes (fallback to disk effective only if not provided)
-      const hasExplicitInput = body.test_username !== undefined || body.test_password !== undefined;
-      const testUser = hasExplicitInput ? String(body.test_username ?? '').trim() : eff.username;
-      const testPass = hasExplicitInput ? String(body.test_password ?? '') : cfg.fast_auth.password;
+      const hasExplicitUser = body.test_username !== undefined && body.test_username !== null;
+      const hasExplicitPass = body.test_password !== undefined && body.test_password !== null;
+
+      const testUser = hasExplicitUser ? String(body.test_username).trim() : eff.username;
+      const testPass = hasExplicitPass ? String(body.test_password) : cfg.fast_auth.password;
       const testUnit = String(body.test_unit ?? eff.unit ?? 'CTY').trim() || 'CTY';
       const testLang = String(body.test_language ?? eff.language ?? 'en').trim() || 'en';
       const testUrl = String(body.test_login_url ?? eff.login_url).trim() || eff.login_url;
+      const timeoutSec = Math.max(1.5, Math.min(Number(body.timeout_sec) || 4.0, 15.0));
 
-      const testMasked = maskPasswordStr(testPass);
-      const testFp = computeCredentialFingerprint(testUser, testPass);
+      const pyScript = `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(BASE_DIR)})
+from utils.login_handler import verify_fast_login_live
+payload = json.loads(sys.argv[1])
+res = verify_fast_login_live(
+    test_username=payload.get("test_username"),
+    test_password=payload.get("test_password"),
+    test_unit=payload.get("test_unit"),
+    test_language=payload.get("test_language"),
+    test_login_url=payload.get("test_login_url"),
+    timeout_sec=float(payload.get("timeout_sec", 4.0)),
+    headless=True,
+    config_dir=${JSON.stringify(CONFIG_DIR)}
+)
+print(json.dumps(res, ensure_ascii=False))
+`;
 
-      // Reference credentials from local config/fast_credentials.yaml / baseline lock
-      const refUser = baseLock.locked ? baseLock.username : eff.username;
-      const refMasked = baseLock.locked ? baseLock.masked_password : eff.masked_password;
-      const refLen = baseLock.locked ? baseLock.password_length : eff.password_length;
-      const refFp = baseLock.locked ? baseLock.fingerprint : eff.fingerprint;
-      const hasRefBaseline = Boolean(refUser && refFp);
+      const argJson = JSON.stringify({
+        test_username: testUser,
+        test_password: testPass,
+        test_unit: testUnit,
+        test_language: testLang,
+        test_login_url: testUrl,
+        timeout_sec: timeoutSec,
+      });
 
-      const isNonEmptyInput = Boolean(testUser && testPass);
-      const isExactMatchWithBaseline = Boolean(
-        isNonEmptyInput && hasRefBaseline && testFp === refFp && testUser === refUser
+      execFile(
+        'python3',
+        ['-S', '-c', pyScript, argJson],
+        { cwd: BASE_DIR, timeout: 25000 },
+        (error, stdout, stderr) => {
+          if (error && !stdout.trim()) {
+            return res.status(500).json({
+              ok: false,
+              overall_status: 'EXEC_ERROR',
+              detail: `调用 Python 登录验证器失败: ${error.message} ${stderr || ''}`.trim(),
+            });
+          }
+          try {
+            const lines = stdout.trim().split('\n');
+            const lastJsonLine = lines[lines.length - 1];
+            const parsed = JSON.parse(lastJsonLine);
+            parsed.effective_credentials = eff;
+            return res.json(parsed);
+          } catch (parseErr: any) {
+            return res.status(500).json({
+              ok: false,
+              overall_status: 'PARSE_ERROR',
+              detail: `解析验证器输出失败: ${parseErr?.message || String(parseErr)} | stdout=${stdout} | stderr=${stderr}`,
+            });
+          }
+        }
       );
-
-      const steps: Array<{
-        step: number;
-        title: string;
-        method: string;
-        status: 'PASS' | 'WARN' | 'FAIL';
-        detail: string;
-        log_output: string;
-      }> = [];
-
-      // Step 1: load_fast_credentials() + Strict Fingerprint Comparison against local config/fast_credentials.yaml
-      let step1Status: 'PASS' | 'WARN' | 'FAIL' = 'FAIL';
-      let step1Detail = '';
-      let step1Log = '';
-
-      if (!credStatus.yaml_syntax_valid) {
-        step1Status = 'FAIL';
-        step1Detail = `❌ config/fast_credentials.yaml 语法解析失败: ${credStatus.yaml_syntax_error}`;
-        step1Log = `[ERROR] YAML 语法错误: ${credStatus.yaml_syntax_error}`;
-      } else if (!isNonEmptyInput) {
-        step1Status = 'FAIL';
-        step1Detail = `❌ 未检测到完整待测账号或密码（当前输入账号: "${testUser || '空'}"，密码长度: ${testPass.length}）。请先在本地 config/fast_credentials.yaml 或左侧表单填写账号密码！`;
-        step1Log = `[ERROR] 待测账号或密码为空 -> 拦截自动登录`;
-      } else if (!hasRefBaseline) {
-        step1Status = 'FAIL';
-        step1Detail = `❌ 本地 config/fast_credentials.yaml 磁盘文件中尚未配置基准账密（当前磁盘文件账号/密码为空）！您在模块 4 输入的待测账密 [账号: "${testUser}", 掩码: ${testMasked}, 指纹: #${testFp}] 无法与空的磁盘 YAML 匹配。请先在本地 config/fast_credentials.yaml 填入正确密码，或点击左侧「保存并设为基准账密」！`;
-        step1Log = `[ERROR] 本地 config/fast_credentials.yaml 账密为空 (未建立基准锁) != 模块4输入指纹 #${testFp}`;
-      } else if (!isExactMatchWithBaseline) {
-        step1Status = 'FAIL';
-        const mismatchReason =
-          testUser !== refUser && testFp !== refFp
-            ? '账号与密码均不匹配'
-            : testUser !== refUser
-              ? `账号不匹配 (输入 "${testUser}" vs 基准 "${refUser}")`
-              : `密码错误/不匹配 (输入密码掩码 ${testMasked} [${testPass.length}位, 指纹 #${testFp}] != 本地 YAML 基准密码掩码 ${refMasked} [${refLen}位, 指纹 #${refFp}])`;
-        step1Detail = `❌ 账密校验失败 (${mismatchReason})！模块 4 当前输入的测试账密与本地 config/fast_credentials.yaml 正确基准账密不一致！`;
-        step1Log = `[ERROR] [CREDENTIAL_MISMATCH] 模块4待测指纹 (#${testFp}) != 本地 fast_credentials.yaml 基准指纹 (#${refFp})`;
-      } else {
-        step1Status = 'PASS';
-        step1Detail = `✅ 账密校验 100% 匹配通过！模块 4 待测账密 [账号: "${testUser}", 掩码: ${testMasked} (${testPass.length}位), 指纹: #${testFp}] 与本地 [${credStatus.active_source}] 基准账密 (#${refFp}) 完全一致！`;
-        step1Log = `[INFO] load_fast_credentials() 基准指纹核验通过 (#${testFp} === #${refFp}) | 账号: ${testUser}, 单位: ${testUnit}, 语言: ${testLang}`;
-      }
-
-      steps.push({
-        step: 1,
-        title: '多级凭据解析与本地 YAML 基准指纹比对 (load_fast_credentials)',
-        method: 'utils.login_handler.load_fast_credentials() + SHA256 基准比对',
-        status: step1Status,
-        detail: step1Detail,
-        log_output: step1Log,
-      });
-
-      // Step 2: Chrome & CDP Client initialization check
-      const cdpPort = cfg.chrome_cdp.remote_debugging_port || 9222;
-      steps.push({
-        step: 2,
-        title: 'Chrome 启动器与 CDP 调试端口初始化 (ChromeLauncher & CDPClient)',
-        method: `CDPClient("http://localhost:${cdpPort}").connect_to_page()`,
-        status: 'PASS',
-        detail: `已核验 CDP 调试端口 :${cdpPort} 与 Chrome 路径配置 (${cfg.chrome_cdp.chrome_path})；CDPClient.attach_upload_file 中 self.logger 已修复无 NameError。`,
-        log_output: `[INFO] ChromeLauncher 绑定远程调试端口 ${cdpPort} 就绪 -> CDPClient WebSocket 会话初始化完成`,
-      });
-
-      // Step 3: Navigate to Login.aspx & wait_for_page_ready
-      let intranetReachable = false;
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const reqProbe = http.get(testUrl, { timeout: 1200 }, (resp) => {
-            intranetReachable = Boolean(resp.statusCode && resp.statusCode < 500);
-            resp.resume();
-            resolve();
-          });
-          reqProbe.on('error', reject);
-          reqProbe.on('timeout', () => {
-            reqProbe.destroy();
-            reject(new Error('timeout'));
-          });
-        });
-      } catch {
-        intranetReachable = false;
-      }
-
-      steps.push({
-        step: 3,
-        title: '导航至 FAST 登录页并轮询 DOM 就绪 (navigate_to_login & wait_for_page_ready)',
-        method: `LoginHandler.navigate_to_login("${testUrl}")`,
-        status: 'PASS',
-        detail: intranetReachable
-          ? `成功连接内网地址 ${testUrl}，检测到关键输入框 ${cfg.selectors.username_input}`
-          : `目标内网地址 ${testUrl} (已加载 Login.aspx 标准 DOM 选择器契约验证 ${cfg.selectors.username_input} 匹配通过)`,
-        log_output: `[INFO] 正在导航到登录页面: ${testUrl}\n[INFO]   页面状态: complete -> 登录页面已就绪 (检测到 ${cfg.selectors.username_input})`,
-      });
-
-      // Step 4: Switch language to English
-      steps.push({
-        step: 4,
-        title: '登录界面语言自动切换为英文 (switch_language)',
-        method: `LoginHandler.switch_language("${testLang}")`,
-        status: 'PASS',
-        detail: `执行 JS 语言切换器匹配 ${cfg.selectors.language_select}，将默认越南语 (Tiếng Việt) 切换为 "${testLang.toUpperCase()}" (English)，确保后续总账菜单与 TB 表均为英文列名。`,
-        log_output: `[INFO] 正在检测并将 FAST 登录界面切换为英文 (English)...\n[INFO] 英文界面切换结果: select_switched`,
-      });
-
-      // Step 5: Fill login form & click Login button
-      let step5Status: 'PASS' | 'WARN' | 'FAIL' = 'FAIL';
-      let step5Detail = '';
-      let step5Log = '';
-
-      if (!isNonEmptyInput) {
-        step5Status = 'FAIL';
-        step5Detail = `❌ 因待测账号或密码为空，LoginHandler.fill_login_form() 自动拦截，拒绝向 Login.aspx 提交空表单！`;
-        step5Log = `[WARN] 未检测到有效账号密码，跳过 fill_login_form`;
-      } else if (!isExactMatchWithBaseline) {
-        step5Status = 'WARN';
-        step5Detail = `⚠️ 已将模块 4 输入的待测账密 [账号: "${testUser}", 密码掩码: ${testMasked} (指纹 #${testFp})] 填入 ${cfg.selectors.username_input} / ${cfg.selectors.password_input} 并点击 ${cfg.selectors.login_button}，正在由 Step 6 校验服务端鉴权响应...`;
-        step5Log = `[INFO] 正在填写登录表单 (待测账号: ${testUser}, 待测密码指纹: #${testFp})...\n[INFO] 点击登录按钮: ${cfg.selectors.login_button}`;
-      } else {
-        step5Status = 'PASS';
-        step5Detail = `✅ 已向 ${cfg.selectors.username_input} 填入 "${testUser}"，向 ${cfg.selectors.password_input} 填入正确掩码密码 (${testMasked})，向 ${cfg.selectors.unit_input} 填入 "${testUnit}"，并点击 ${cfg.selectors.login_button}`;
-        step5Log = `[INFO] 正在填写登录表单...\n[INFO] 用户名填写: 成功 | 密码填写: 成功 | 单位填写: 成功\n[INFO] 使用选择器点击登录按钮: ${cfg.selectors.login_button}`;
-      }
-
-      steps.push({
-        step: 5,
-        title: '自动注入账号/密码/单位并触发登录按钮 (fill_login_form & click_login_button)',
-        method: `LoginHandler.fill_login_form("${testUser || '(空)'}", "${testMasked || '(空)'}", "${testUnit}")`,
-        status: step5Status,
-        detail: step5Detail,
-        log_output: step5Log,
-      });
-
-      // Step 6: Verify is_logged_in() — ONLY PASSES IF CREDENTIALS MATCH BASELINE!
-      const step6Pass = isExactMatchWithBaseline;
-      let step6Detail = '';
-      let step6Log = '';
-
-      if (!isNonEmptyInput) {
-        step6Detail = `❌ 未完成自动登录闭环：账号或密码为空，LoginHandler.is_logged_in() 返回 False。`;
-        step6Log = `[ERROR] 登录未完成：请先完善 config/fast_credentials.yaml 凭据配置`;
-      } else if (!hasRefBaseline) {
-        step6Detail = `❌ 登录核验未通过：本地 config/fast_credentials.yaml 尚未保存有效基准账密，当前仅在输入框临时填写的密码未落盘，LoginHandler.is_logged_in() 判定为 False！`;
-        step6Log = `[ERROR] 本地 config/fast_credentials.yaml 为空，拒绝未落盘凭据通过验收`;
-      } else if (!isExactMatchWithBaseline) {
-        step6Detail = `❌ 登录认证被拒绝 (AUTH_FAILED)！您在模块 4 输入的测试密码 (${testMasked}, 指纹 #${testFp}) 与本地 config/fast_credentials.yaml 中的正确密码 (${refMasked}, 指纹 #${refFp}) 不匹配！FAST Login.aspx 鉴权失败：页面停留在 Login.aspx 并提示密码错误，未检测到 Logout 按钮与 "${cfg.selectors.menu_general_ledger}" 主菜单，LoginHandler.is_logged_in() 返回 False！`;
-        step6Log = `[ERROR] FAST Login.aspx 鉴权拒绝: Invalid username or password (Sai tên đăng nhập hoặc mật khẩu)\n[ERROR] LoginHandler.is_logged_in() == False (URL 仍为 Login.aspx，自动登录失败！)`;
-      } else {
-        step6Detail = `✅ 三重判定全部通过：① 账密指纹与本地 config/fast_credentials.yaml 100% 匹配 (#${testFp})；② window.location.href 已跳出 Login.aspx 进入 Main/Default.aspx 且检测到 a[href*='Logout']；③ 页面正文包含 "${cfg.selectors.menu_general_ledger}" 与 "Welcome"，LoginHandler.is_logged_in() 返回 True！`;
-        step6Log = `[INFO] 登录成功（已进入英文主界面 Main/Default.aspx）\n[INFO] LoginHandler.is_logged_in() == True -> FAST 网页自动登录 6 步验证全部通过！`;
-      }
-
-      steps.push({
-        step: 6,
-        title: '登录完成三重特征核验 (LoginHandler.is_logged_in)',
-        method: 'LoginHandler.is_logged_in() -> _perform_fast_login()',
-        status: step6Pass ? 'PASS' : 'FAIL',
-        detail: step6Detail,
-        log_output: step6Log,
-      });
-
-      const overallPass = steps.every((s) => s.status === 'PASS');
-      const overallStatus = overallPass
-        ? 'PASS'
-        : isNonEmptyInput && hasRefBaseline && !isExactMatchWithBaseline
-          ? 'AUTH_FAILED'
-          : 'ACTION_REQUIRED';
-
-      res.json({
-        ok: true,
-        overall_status: overallStatus,
-        credential_match: isExactMatchWithBaseline,
-        tested_credentials: {
-          username: testUser,
-          masked_password: testMasked,
-          password_length: testPass.length,
-          fingerprint: testFp,
-          unit: testUnit,
-          language: testLang,
-        },
-        baseline_credentials: {
-          username: refUser,
-          masked_password: refMasked,
-          password_length: refLen,
-          fingerprint: refFp,
-          has_baseline: hasRefBaseline,
-        },
-        intranet_live: intranetReachable,
-        verified_at: new Date().toLocaleString('zh-CN', { hour12: false }),
-        effective_credentials: eff,
-        steps,
-        summary_message: overallPass
-          ? `✅ 自动登录全链路 6 步验证全部通过 (PASS)！待测账密 [${testUser}] (掩码 ${testMasked}, 指纹 #${testFp}) 与本地 config/fast_credentials.yaml 基准 100% 匹配，LoginHandler.is_logged_in() 核验通过。`
-          : overallStatus === 'AUTH_FAILED'
-            ? `❌ 自动登录验证失败 (AUTH_FAILED — 密码错误/不匹配)！模块 4 当前输入的待测账密 [掩码: ${testMasked}, 指纹: #${testFp}] 与本地 config/fast_credentials.yaml 正确基准账密 [掩码: ${refMasked}, 指纹: #${refFp}] 不一致，Step 1 与 Step 6 已拦截报错！`
-            : `⚠️ 验证未通过 (${overallStatus})：本地 config/fast_credentials.yaml 尚未配置基准账密或当前输入为空（Step 1 & Step 6 拦截）。请先在本地 config/fast_credentials.yaml 填写正确账密或点击「保存并设为基准账密」。`,
-      });
     } catch (err: any) {
       res.status(500).json({ ok: false, detail: err?.message || String(err) });
     }
   });
+
+  // [GET & POST /fast-test-server/FAW_TIMBERLAND/Main/Login.aspx]
+  // 内置越南 FAST ASP.NET WebForms 仿真服务端（供非内网环境下实测浏览器/HTTP 访问、服务端错密/过期报错捕获与登录跳转）
+  const renderFastTestLoginHtml = (errorMsg = '') => `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>FAST Financial - Login.aspx</title></head>
+<body>
+  <form method="post" action="/fast-test-server/FAW_TIMBERLAND/Main/Login.aspx">
+    <input type="hidden" name="__VIEWSTATE" value="dDwtMTI3OTM0Njc4O3Q8O2w8aTwxPjs+O2w8dDw7bDxpPDE+Oz47bDx0PHA8cDxsPFZpc2libGU7PjtsPG88dD47Pj47Pjs7Pjs+Pjs+Pjs+" />
+    <input type="hidden" name="__VIEWSTATEGENERATOR" value="C2EE9ABB" />
+    <input type="hidden" name="__EVENTVALIDATION" value="/wEdAAVe8K3c9F0a" />
+    <input type="text" id="LoginExtender_txtUserName" name="LoginExtender$txtUserName" />
+    <input type="password" id="LoginExtender_txtPassword" name="LoginExtender$txtPassword" />
+    <input type="text" id="txtUnit" name="txtUnit" value="CTY" />
+    <select id="LoginExtender_ddlLanguage" name="LoginExtender$ddlLanguage">
+      <option value="V">Tiếng Việt</option>
+      <option value="E">English</option>
+    </select>
+    <button type="submit" id="LoginExtender_Ok" name="LoginExtender$Ok" value="Login">Login</button>
+    ${errorMsg ? `<span id="LoginExtender_lblError" class="login-error" style="color:red;">${errorMsg}</span>` : ''}
+  </form>
+</body>
+</html>`;
+
+  app.get('/fast-test-server/FAW_TIMBERLAND/Main/Login.aspx', (_req: Request, res: Response) => {
+    res.status(200).type('html').send(renderFastTestLoginHtml(''));
+  });
+
+  app.post(
+    '/fast-test-server/FAW_TIMBERLAND/Main/Login.aspx',
+    express.urlencoded({ extended: true }),
+    (req: Request, res: Response) => {
+      const b = req.body || {};
+      const u = String(b['LoginExtender$txtUserName'] || b['LoginExtender_txtUserName'] || '').trim();
+      const p = String(b['LoginExtender$txtPassword'] || b['LoginExtender_txtPassword'] || '');
+      if ((u === 'FIN_ADMIN_VN' || u === 'ADMIN') && p === 'Fast@2026#Timber') {
+        return res.status(200).type('html').send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>FAST Financial - Main/Default.aspx</title></head>
+<body>
+  <div id="header">Welcome ${u} | <a href="Logout.aspx" id="btnLogout">Logout</a></div>
+  <nav id="menu"><span>General Ledger</span> | <span>Journal Entry</span> | <span>Post to GL</span> | <span>Trial Balance</span></nav>
+</body>
+</html>`);
+      }
+      if (p.toLowerCase().includes('expired') || p.includes('2023') || p.includes('2024')) {
+        return res
+          .status(200)
+          .type('html')
+          .send(
+            renderFastTestLoginHtml(
+              `Tài khoản hoặc mật khẩu đã hết hạn! / Password for user "${u || 'UNKNOWN'}" has expired on FAST Server (错误代码: FAST_AUTH_403_EXPIRED)`
+            )
+          );
+      }
+      return res
+        .status(200)
+        .type('html')
+        .send(
+          renderFastTestLoginHtml(
+            `Sai tên đăng nhập hoặc mật khẩu! / Invalid username or password for user "${u || 'EMPTY'}" (错误代码: FAST_AUTH_401_INVALID_CREDENTIALS)`
+          )
+        );
+    }
+  );
 
   // [POST /api/generate-sample]
   app.post('/api/generate-sample', (_req: Request, res: Response) => {

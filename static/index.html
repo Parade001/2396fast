@@ -264,19 +264,21 @@
         <div class="card">
           <div class="card-header">
             <div>
-              <h2 class="card-title">方案 A 专享：config/fast_credentials.yaml 基准指纹校验器与 FAST 自动登录 6 步真实验证台</h2>
-              <p class="card-desc">将模块 4 输入框中的待测账密与本地磁盘 config/fast_credentials.yaml 基准指纹 (SHA-256) 严格比对：输入错误密码点击验证或未授权保存均会精准拦截并报错 (AUTH_FAILED)</p>
+              <h2 class="card-title">config/fast_credentials.yaml 真实浏览器访问 10.7.3.230 登录校验与异常捕获工作台</h2>
+              <p class="card-desc">直接调用 utils/login_handler.py 的 verify_fast_login_live() 真实访问目标 URL (如 http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx)：① 若访问超时或打不开 URL，捕获 Timeout / URLError 返回当前页面；② 若 YAML 中填写了错误或过期账密，捕获服务端报错返回当前页面。</p>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-              <button id="btn-fc-quick-demo" class="btn btn-secondary" type="button">1. 写入正确基准账密并验证 (PASS)</button>
-              <button id="btn-fc-wrong-demo" class="btn btn-danger" type="button">2. 故意输入错误密码测试拦截 (FAIL)</button>
-              <button id="btn-fc-run-verify" class="btn btn-primary" type="button">校验当前输入账密 (6步登录测试)</button>
+              <button id="btn-fc-real-1073230" class="btn btn-primary" type="button">🌐 1. 实测访问 10.7.3.230 (捕获超时或内网鉴权)</button>
+              <button id="btn-fc-wrong-demo" class="btn btn-danger" type="button">🚫 2. 实测错密/过期服务端报错捕获 (AUTH_FAILED)</button>
+              <button id="btn-fc-quick-demo" class="btn btn-secondary" type="button">✅ 3. 实测服务端账密通过 (PASS)</button>
             </div>
           </div>
 
           <div id="fc-status-banner" class="status-banner warn">
             正在读取 config/fast_credentials.yaml 多级凭据配置状态...
           </div>
+
+          <div id="fc-captured-error-box" style="display:none; margin-bottom:14px; padding:12px 14px; border-radius:8px; background:#fef2f2; border:2px solid #dc2626; color:#7f1d1d;"></div>
 
           <div class="grid-2" style="margin-bottom: 14px;">
             <div>
@@ -310,15 +312,9 @@
                   <input id="fc-url" type="text" value="http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx" />
                 </div>
               </div>
-              <div style="margin-bottom:8px;">
-                <label class="check-inline" style="font-size:12px;">
-                  <input id="fc-force-baseline" type="checkbox" />
-                  允许覆写本地 YAML 基准账密锁 (--force-update-baseline)：仅当修改真实正确密码时勾选
-                </label>
-              </div>
               <div class="form-row" style="margin-bottom:0;">
-                <button id="btn-fc-run-verify-inline" class="btn btn-primary" type="button">仅测试当前输入账密 (不改 YAML)</button>
-                <button id="btn-fc-save" class="btn btn-secondary" type="button">保存至 fast_credentials.yaml</button>
+                <button id="btn-fc-run-verify" class="btn btn-primary" type="button">🌐 真实访问目标 URL 测试账密</button>
+                <button id="btn-fc-save" class="btn btn-secondary" type="button">💾 保存至 fast_credentials.yaml 并实测访问</button>
                 <a href="/api/download?path=config/fast_credentials.yaml" class="btn btn-secondary" style="text-decoration:none;">下载 YAML</a>
               </div>
             </div>
@@ -1147,7 +1143,7 @@ python sap2fast_full_fix.py --mode post
         renderActiveDocView();
       });
 
-      // 模块 4：方案 A (config/fast_credentials.yaml) 交互式校验与 6 步自动登录验证
+      // 模块 4：config/fast_credentials.yaml 真实访问目标 URL (10.7.3.230) 与异常捕获验证
       async function loadFastCredentials() {
         try {
           const res = await fetch('/api/fast-credentials');
@@ -1162,11 +1158,11 @@ python sap2fast_full_fix.py --mode post
 
           const fcBanner = document.getElementById('fc-status-banner');
           if (data.is_ready_for_auto_login) {
-            fcBanner.className = 'status-banner pass';
-            fcBanner.textContent = `[凭据校验已就绪 PASS] 当前生效来源: ${data.active_source} · 账号: ${data.effective.username} · 密码掩码: ${data.effective.masked_password} (长度 ${data.effective.password_length} 位) · 单位: ${data.effective.unit} · 语言: ${data.effective.language}`;
+            fcBanner.className = 'status-banner warn';
+            fcBanner.textContent = `[已读取本地凭据，待真实访问目标 URL 核验] 来源: ${data.active_source} · 账号: ${data.effective.username} · 密码掩码: ${data.effective.masked_password} (${data.effective.password_length}位) · 目标地址: ${data.effective.login_url}。请点击下方「真实访问目标 URL 测试账密」按钮验证服务端连通性与账密有效性。`;
           } else {
             fcBanner.className = 'status-banner warn';
-            fcBanner.textContent = `[待填写账号密码] config/fast_credentials.yaml 语法合法，但当前 username 或 password 为空。请在下方填入您的 FAST 账号密码并点击“保存并校验”或点击“一键填入测试账密并验证”。`;
+            fcBanner.textContent = `[待填写账号密码] config/fast_credentials.yaml 语法合法，但当前 username 或 password 为空。请在下方填入您的 FAST 账号密码并点击“真实访问目标 URL 测试账密”。`;
           }
 
           const ptbody = document.getElementById('fc-priority-tbody');
@@ -1176,7 +1172,7 @@ python sap2fast_full_fix.py --mode post
               <td>${escapeHtml(item.source)}</td>
               <td class="mono"><strong>${escapeHtml(item.username)}</strong></td>
               <td class="mono">${item.has_password ? `${escapeHtml(item.masked_password || '••••••')} (${item.password_length || 6}位)` : '未设置'}</td>
-              <td><span class="badge ${item.status.indexOf('PASS') >= 0 || item.status.indexOf('已配置') >= 0 ? 'badge-pass' : 'badge-fail'}">${escapeHtml(item.status)}</span></td>
+              <td><span class="badge ${item.has_password ? 'badge-warn' : 'badge-fail'}">${escapeHtml(item.status)}</span></td>
             </tr>
           `).join('');
         } catch (e) {
@@ -1184,9 +1180,14 @@ python sap2fast_full_fix.py --mode post
         }
       }
 
-      async function runFastLoginVerify(overrideUser, overridePass) {
+      async function runFastLoginVerify(overrideUser, overridePass, overrideUrl) {
         const testUser = overrideUser !== undefined ? overrideUser : document.getElementById('fc-username').value;
         const testPass = overridePass !== undefined ? overridePass : document.getElementById('fc-password').value;
+        const testUrl = overrideUrl !== undefined ? overrideUrl : document.getElementById('fc-url').value;
+        const fcBanner = document.getElementById('fc-status-banner');
+        fcBanner.className = 'status-banner warn';
+        fcBanner.textContent = `正在真实访问目标地址 ${testUrl} 并校验账号 [${testUser || '空'}]...`;
+
         const res = await fetch('/api/fast-login-verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1195,16 +1196,36 @@ python sap2fast_full_fix.py --mode post
             test_password: testPass,
             test_unit: document.getElementById('fc-unit').value,
             test_language: document.getElementById('fc-language').value,
-            test_login_url: document.getElementById('fc-url').value,
+            test_login_url: testUrl,
+            timeout_sec: 3.5,
           }),
         });
         const data = await res.json();
         if (!data.ok) return;
-        const fcBanner = document.getElementById('fc-status-banner');
-        const bType = data.overall_status === 'PASS' ? 'pass' : (data.overall_status === 'AUTH_FAILED' ? 'err' : 'warn');
+        const bType = data.overall_status === 'PASS' ? 'pass' : 'err';
         fcBanner.className = `status-banner ${bType}`;
         fcBanner.textContent = data.summary_message;
-        setBanner(`[FAST 自动登录验证] ${data.summary_message}`, bType);
+        setBanner(`[FAST 登录实测] ${data.summary_message}`, bType);
+
+        const errBox = document.getElementById('fc-captured-error-box');
+        if (errBox) {
+          if (data.captured_error) {
+            errBox.style.display = 'block';
+            errBox.innerHTML = `
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+                <strong style="color:#991b1b;font-size:14px;">🚨 真实浏览器 / HTTP 访问异常捕获报告 (Captured Error)</strong>
+                <span class="badge badge-fail">${escapeHtml(data.captured_error.error_type)} · 耗时 ${data.captured_error.elapsed_ms} ms</span>
+              </div>
+              <div style="margin-top:6px;font-size:12.5px;"><strong>发生阶段：</strong><span class="mono">${escapeHtml(data.captured_error.error_stage)}</span></div>
+              <div style="font-size:12.5px;"><strong>目标地址：</strong><span class="mono">${escapeHtml(data.captured_error.target_url)}</span></div>
+              <div style="margin-top:6px;padding:8px;background:#fff;border:1px solid #fca5a5;border-radius:4px;font-family:monospace;color:#b91c1c;font-weight:700;">${escapeHtml(data.captured_error.error_message)}</div>
+              <div style="margin-top:6px;font-size:12px;color:#991b1b;"><strong>排查建议：</strong>${escapeHtml(data.captured_error.suggestion)}</div>
+            `;
+          } else {
+            errBox.style.display = 'none';
+            errBox.innerHTML = '';
+          }
+        }
 
         const stbody = document.getElementById('fc-steps-tbody');
         stbody.innerHTML = (data.steps || []).map(s => `
@@ -1221,18 +1242,16 @@ python sap2fast_full_fix.py --mode post
         `).join('');
       }
 
-      async function saveFastCredentials(overrideUser, overridePass, overrideForceBaseline) {
+      async function saveFastCredentials(overrideUser, overridePass, overrideUrl) {
         const targetUser = overrideUser !== undefined ? overrideUser : document.getElementById('fc-username').value;
         const targetPass = overridePass !== undefined ? overridePass : document.getElementById('fc-password').value;
-        const forceEl = document.getElementById('fc-force-baseline');
-        const useForce = overrideForceBaseline !== undefined ? overrideForceBaseline : (forceEl ? forceEl.checked : false);
+        const targetUrl = overrideUrl !== undefined ? overrideUrl : document.getElementById('fc-url').value;
         const payload = {
           username: targetUser,
           password: targetPass,
           unit: document.getElementById('fc-unit').value,
           language: document.getElementById('fc-language').value,
-          login_url: document.getElementById('fc-url').value,
-          force_update_baseline: useForce,
+          login_url: targetUrl,
         };
         const res = await fetch('/api/fast-credentials', {
           method: 'POST',
@@ -1241,15 +1260,8 @@ python sap2fast_full_fix.py --mode post
         });
         const data = await res.json();
         if (data.ok) {
-          if (forceEl) forceEl.checked = false;
           await loadFastCredentials();
-          await runFastLoginVerify(targetUser, targetPass);
-        } else {
-          const fcBanner = document.getElementById('fc-status-banner');
-          fcBanner.className = 'status-banner err';
-          fcBanner.textContent = data.detail || '保存被基准账密保护锁拦截';
-          setBanner(data.detail || '保存被基准账密保护锁拦截', 'err');
-          await runFastLoginVerify(targetUser, targetPass);
+          await runFastLoginVerify(targetUser, targetPass, targetUrl);
         }
       }
 
@@ -1259,21 +1271,42 @@ python sap2fast_full_fix.py --mode post
       });
       document.getElementById('btn-fc-save').addEventListener('click', () => saveFastCredentials());
       document.getElementById('btn-fc-run-verify').addEventListener('click', () => runFastLoginVerify());
-      const inlineVerifyBtn = document.getElementById('btn-fc-run-verify-inline');
-      if (inlineVerifyBtn) inlineVerifyBtn.addEventListener('click', () => runFastLoginVerify());
-      document.getElementById('btn-fc-quick-demo').addEventListener('click', () => {
-        document.getElementById('fc-username').value = 'FIN_ADMIN_VN';
-        document.getElementById('fc-password').value = 'Fast@2026#Timber';
-        saveFastCredentials('FIN_ADMIN_VN', 'Fast@2026#Timber', true);
-      });
+
+      const btnReal1073230 = document.getElementById('btn-fc-real-1073230');
+      if (btnReal1073230) {
+        btnReal1073230.addEventListener('click', async () => {
+          const realUrl = 'http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx';
+          const u = document.getElementById('fc-username').value || 'FIN_ADMIN_VN';
+          const p = document.getElementById('fc-password').value || 'Fast@2026#Timber';
+          document.getElementById('fc-url').value = realUrl;
+          document.getElementById('fc-username').value = u;
+          document.getElementById('fc-password').value = p;
+          await runFastLoginVerify(u, p, realUrl);
+        });
+      }
+
       const wrongDemoBtn = document.getElementById('btn-fc-wrong-demo');
       if (wrongDemoBtn) {
         wrongDemoBtn.addEventListener('click', async () => {
-          document.getElementById('fc-username').value = document.getElementById('fc-username').value || 'FIN_ADMIN_VN';
-          document.getElementById('fc-password').value = 'WrongPass_999999!';
-          await runFastLoginVerify(document.getElementById('fc-username').value, 'WrongPass_999999!');
+          const sandboxUrl = window.location.origin + '/fast-test-server/FAW_TIMBERLAND/Main/Login.aspx';
+          const u = document.getElementById('fc-username').value || 'FIN_ADMIN_VN';
+          const wrongPass = 'WrongOrExpired_2023!';
+          document.getElementById('fc-url').value = sandboxUrl;
+          document.getElementById('fc-username').value = u;
+          document.getElementById('fc-password').value = wrongPass;
+          await runFastLoginVerify(u, wrongPass, sandboxUrl);
         });
       }
+
+      document.getElementById('btn-fc-quick-demo').addEventListener('click', async () => {
+        const sandboxUrl = window.location.origin + '/fast-test-server/FAW_TIMBERLAND/Main/Login.aspx';
+        const u = 'FIN_ADMIN_VN';
+        const validPass = 'Fast@2026#Timber';
+        document.getElementById('fc-url').value = sandboxUrl;
+        document.getElementById('fc-username').value = u;
+        document.getElementById('fc-password').value = validPass;
+        await runFastLoginVerify(u, validPass, sandboxUrl);
+      });
 
       // 初始化加载（默认打开最新 Reviews 代码审核报告或评估报告）
       loadOverview();
