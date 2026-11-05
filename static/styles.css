@@ -351,14 +351,430 @@ td.mono {
 .doc-viewer {
   background: #ffffff;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 18px 20px;
+  border-radius: 6px;
+  padding: 24px 28px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  max-height: 760px;
+  overflow-y: auto;
+}
+
+.doc-viewer.raw-mode {
   font-family: var(--font-mono);
   font-size: 12.5px;
   white-space: pre-wrap;
+  background: #0f172a;
+  color: #e2e8f0;
   line-height: 1.65;
-  max-height: 640px;
+}
+
+/* 模块 5：Markdown 文档切换按钮与高亮状态 */
+.doc-selector-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.doc-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  height: auto;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-radius: 5px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-left: 4px solid transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.doc-btn:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.doc-btn.active {
+  background: #eff6ff;
+  border-color: var(--accent-primary);
+  border-left: 4px solid var(--accent-primary);
+  box-shadow: 0 1px 4px rgba(15, 76, 129, 0.14);
+}
+
+.doc-btn .doc-btn-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.doc-btn.active .doc-btn-title {
+  color: var(--accent-primary);
+}
+
+.doc-btn .doc-btn-file {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.doc-btn.active .doc-btn-file {
+  color: #1e40af;
+  font-weight: 600;
+}
+
+/* Markdown 工具栏与元信息栏 */
+.doc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.doc-meta-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.doc-meta-info strong {
+  font-family: var(--font-mono);
+  color: var(--accent-primary);
+  font-size: 13px;
+}
+
+.doc-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-search-input {
+  height: 32px;
+  width: 230px;
+  padding: 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 12.5px;
+  background: #ffffff;
+}
+
+.mode-switch-group {
+  display: inline-flex;
+  background: #e2e8f0;
+  padding: 2px;
+  border-radius: 5px;
+}
+
+.mode-switch-btn {
+  border: none;
+  background: transparent;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mode-switch-btn.active {
+  background: #ffffff;
+  color: var(--accent-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Markdown 预览主布局（左侧正文 + 右侧大纲目录） */
+.md-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1024px) {
+  .md-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+.md-toc-card {
+  background: #f8fafc;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px 14px;
+  max-height: 760px;
   overflow-y: auto;
+  position: sticky;
+  top: 12px;
+}
+
+.md-toc-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-toc-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.md-toc-item a {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  line-height: 1.35;
+}
+
+.md-toc-item a:hover,
+.md-toc-item a.active {
+  background: #eff6ff;
+  color: var(--accent-primary);
+  border-left-color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.md-toc-item.toc-h2 a {
+  padding-left: 14px;
+}
+
+.md-toc-item.toc-h3 a {
+  padding-left: 24px;
+  font-size: 11.5px;
+}
+
+/* Markdown 富文本排版样式 */
+.md-rendered h1 {
+  font-size: 21px;
+  font-weight: 800;
+  color: #0f172a;
+  padding-bottom: 10px;
+  margin: 4px 0 16px;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.md-rendered h2 {
+  font-size: 17px;
+  font-weight: 700;
+  color: #0f4c81;
+  padding-bottom: 6px;
+  margin: 24px 0 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.md-rendered h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 18px 0 8px;
+}
+
+.md-rendered h4 {
+  font-size: 14px;
+  font-weight: 700;
+  color: #334155;
+  margin: 14px 0 6px;
+}
+
+.md-rendered p {
+  margin: 8px 0 12px;
+  color: #1e293b;
+}
+
+.md-rendered ul,
+.md-rendered ol {
+  margin: 8px 0 14px 22px;
+}
+
+.md-rendered li {
+  margin: 4px 0;
+}
+
+.md-rendered li.md-task-item {
+  list-style: none;
+  margin-left: -18px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #f8fafc;
+  border-left: 3px solid #0f4c81;
+  margin-bottom: 6px;
+}
+
+.md-rendered li.md-task-item input[type="checkbox"] {
+  margin-right: 8px;
+  transform: translateY(1px);
+  accent-color: #0f4c81;
+}
+
+.md-rendered blockquote {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: #f0f9ff;
+  border-left: 4px solid #0284c7;
+  color: #0c4a6e;
+  border-radius: 0 4px 4px 0;
+}
+
+.md-rendered blockquote p {
+  margin: 0;
+  color: inherit;
+}
+
+.md-rendered hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 20px 0;
+}
+
+.md-rendered code.md-inline-code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #0f4c81;
+  border: 1px solid #e2e8f0;
+}
+
+.md-rendered code.md-inline-code.hl-line {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fde68a;
+  font-weight: 700;
+}
+
+.md-rendered code.md-inline-code.hl-path {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+
+.md-rendered .md-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0 18px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+}
+
+.md-rendered table.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-rendered table.md-table th,
+.md-rendered table.md-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  border-right: 1px solid #f1f5f9;
+  white-space: normal;
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+.md-rendered table.md-table th {
+  background: #f1f5f9;
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.md-rendered table.md-table tbody tr:nth-child(even) {
+  background: #f8fafc;
+}
+
+.md-rendered table.md-table tbody tr:hover {
+  background: #eff6ff;
+}
+
+/* Markdown 代码块语法高亮 */
+.md-code-container {
+  margin: 12px 0 16px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #1e293b;
+  background: #0f172a;
+}
+
+.md-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #1e293b;
+  color: #94a3b8;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.md-code-copy-btn {
+  background: #334155;
+  color: #f8fafc;
+  border: none;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.md-code-copy-btn:hover {
+  background: #475569;
+}
+
+.md-code-pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  white-space: pre;
+}
+
+.tok-cmt { color: #64748b; font-style: italic; }
+.tok-kw  { color: #38bdf8; font-weight: 600; }
+.tok-str { color: #a7f3d0; }
+.tok-num { color: #fbbf24; }
+.tok-key { color: #93c5fd; font-weight: 600; }
+
+mark.md-search-hit {
+  background: #fde047;
+  color: #0f172a;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: 700;
 }
 
 .grid-2 {

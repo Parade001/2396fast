@@ -613,25 +613,42 @@ def handle_api_skills() -> Dict[str, Any]:
 def handle_api_doc(name: str) -> Dict[str, Any]:
     """
     [GET /api/docs/<name> & GET /api/doc/<name>]
-    读取项目根目录下的 1104 核心验收报告、评估报告、README、CFO 会议纪要、
-    登陆链接说明以及最新生成的 Reviews_<时间戳>.md 代码审核报告。
+    仅读取项目根目录下的 10 份 Markdown 说明文档（最新 Reviews 报告、1104 评估报告、
+    需求 6/7 验收报告、README、登陆链接、两份 1103 CFO 会议纪要、使用说明、开发说明、财务业务需求），
+    返回文档内容与行数统计供前端 Markdown 预览渲染。
     """
+    target: Optional[Path] = None
     if name == "review_latest":
         reviews = sorted(BASE_DIR.glob("Reviews_*.md"), reverse=True)
         if reviews:
             target = reviews[0]
-            return {"ok": True, "name": name, "filename": target.name, "content": target.read_text(encoding="utf-8")}
-    doc_map = {
-        "eval_1104": BASE_DIR / "功能对比、评估报告1104.md",
-        "accept_1104": BASE_DIR / "需求6-7实现验收报告1104.md",
-        "readme": BASE_DIR / "README.md",
-        "cfo_1103": BASE_DIR / "1103_CFO会议纪要_正式版.md",
-        "login_guide": BASE_DIR / "登陆链接.md",
-    }
-    target = doc_map.get(name)
+    else:
+        doc_map = {
+            "eval_1104": BASE_DIR / "功能对比、评估报告1104.md",
+            "accept_1104": BASE_DIR / "需求6-7实现验收报告1104.md",
+            "readme": BASE_DIR / "README.md",
+            "cfo_1103": BASE_DIR / "1103_CFO会议纪要_正式版.md",
+            "cfo_update_1103": BASE_DIR / "1103与CFO会议纪要及需求更新.md",
+            "manual_ops": BASE_DIR / "SAP2FAST 使用说明（财务与运维操作手册）.md",
+            "arch_dev": BASE_DIR / "SAP2FAST 开发说明（技术架构与重构设计文档）.md",
+            "biz_req": BASE_DIR / "财务业务需求.md",
+            "login_guide": BASE_DIR / "登陆链接.md",
+        }
+        target = doc_map.get(name)
+
     if not target or not target.exists():
         raise FileNotFoundError(f"文档不存在: {name}")
-    return {"ok": True, "name": name, "filename": target.name, "content": target.read_text(encoding="utf-8")}
+
+    text = target.read_text(encoding="utf-8")
+    rel_name = str(target.relative_to(BASE_DIR)) if target.is_relative_to(BASE_DIR) else target.name
+    return {
+        "ok": True,
+        "name": name,
+        "filename": rel_name,
+        "line_count": len(text.splitlines()),
+        "size_bytes": len(text.encode("utf-8")),
+        "content": text,
+    }
 
 
 # ------------------------------------------------------------------------------
