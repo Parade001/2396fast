@@ -571,3 +571,19 @@ fkber:
     '6600670001': '6429'
     '6600560001': '8111'
     '6600090104': '6428'
+
+# ==============================================================================
+# 越南 FAST 网页自动化与登录账号配置（兜底配置项）
+# 推荐优先在 `config/fast_credentials.yaml` 或 `.env` 中填写账号密码
+# ==============================================================================
+chrome:
+  chrome_path: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+  remote_debugging_port: 9222
+  max_retries: 3
+  close_browser_on_exit: true
+  fast_url: 'http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx'
+  fast_user: ''
+  fast_password: ''
+  fast_unit: 'CTY'
+  fast_language: 'en'
+

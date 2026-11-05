@@ -1,13 +1,43 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+文件名称: utils/posting_handler.py
+模块定位: 越南 FAST 财务系统网页端批量勾选与总账过账 (Post to GL) 自动化处理器
+================================================================================
+【本文件核心作用】
+1. 导航至越南 FAST 系统的过账菜单：`General` -> `Post Transaction`；
+2. 自动检测待过账凭证列表表格中是否存在未过账记录 (`find_checkboxes_in_table` / `has_more_records`)；
+3. 自动点击表头 `Select` 全选按钮 (`div.HeaderArrowImage`) 或逐行勾选全部复选框 (`click_all_checkboxes`)；
+4. 自动点击工具栏上的 `Post to GL` 按钮 (`ctl00_FastBusiness_MainReport_ToolbarButton_GLPost`)，
+   并轮询等待页面出现 `Refresh` 与 `Post Transaction` 标志以确认当前批次过账完成 (`wait_for_processing`)。
+
+【1104 版本关键修改与修复说明】
+- 修复了 `process_posting()` 方法（第 281~301 行）中的严重逻辑与误导日志缺陷：
+  * 老版本未判断 `self.click_all_checkboxes()` 与 `self.click_post_to_gl_button()` 的返回值，
+    无论点击成功还是失败都会无条件执行 `print("点击 Post TO GL 按钮失败")` 并继续等待；
+  * 1104 版改为严格校验返回值：若未勾选到复选框则立即返回 `False`；若 `click_post_to_gl_button()`
+    返回 `False` 才打印失败并返回 `False`；点击成功后打印 `"已点击 Post TO GL 按钮，正在等待过账处理完成..."`。
+================================================================================
+"""
+
 import time
 from typing import List, Dict, Any
 from utils import CDPClient
 
 
 class PostingHandler:
+    """越南 FAST 网页端批量勾选与 Post to GL 总账过账处理器。"""
+
     def __init__(self, cdp_client: CDPClient):
+        """
+        初始化过账处理器。
+        :param cdp_client: 已连接到越南 FAST 网页的 CDPClient 实例
+        """
         self.cdp = cdp_client
 
     def navigate_to_posting_page(self) -> bool:
+        """依次点击 General 菜单与 Post Transaction 子菜单，进入批量过账页面。"""
         print("正在导航到过帐页面...")
 
         general_clicked = self.cdp.click_element(
@@ -68,9 +98,9 @@ class PostingHandler:
         return False
 
     def find_checkboxes_in_table(self) -> List[Dict[str, Any]]:
+        """查找 FAST 待过账列表中的首行复选框控件，判断当前页是否有待过账凭证。"""
         print("正在查找表格中的复选框...")
 
-        # 查找特定id的input控件
         script = """
             (function() {
                 var checkboxes = [];
@@ -93,12 +123,14 @@ class PostingHandler:
         return result if result else []
 
     def click_all_checkboxes(self) -> int:
+        """
+        优先点击表头 `Select` 全选按钮 (`div.HeaderArrowImage`)；
+        若未找到全选按钮，则自动遍历点击表格中所有未勾选的 checkbox，返回勾选数量。
+        """
         print("正在点击全选按钮...")
 
-        # 首先尝试查找 class=HeaderArrowImage 且 innerText=Select 的 div 元素
         script = """
             (function() {
-                // 查找 class=HeaderArrowImage 且 innerText=Select 的 div 元素
                 var divs = document.querySelectorAll('div.HeaderArrowImage');
                 for (var i = 0; i < divs.length; i++) {
                     var text = (divs[i].innerText || divs[i].textContent || '').trim();
@@ -116,7 +148,6 @@ class PostingHandler:
         if result == 'clicked_header_arrow':
             print("已点击 Select 全选按钮 (HeaderArrowImage)")
             time.sleep(1)
-            # 获取选中的复选框数量
             count_script = """
                 (function() {
                     var checkboxes = document.querySelectorAll('table input[type="checkbox"]');
@@ -133,7 +164,6 @@ class PostingHandler:
             print(f"已全选 {checked_count} 个复选框")
             return checked_count
 
-        # 如果找不到 HeaderArrowImage div，回退到原来的逐个点击方式
         print("未找到 Select 全选按钮，使用逐个点击方式...")
 
         script = """
@@ -162,9 +192,9 @@ class PostingHandler:
         return clicked_count
 
     def click_post_to_gl_button(self) -> bool:
+        """点击工具栏上的 `Post to GL` 按钮触发凭证过账入总账。"""
         print("正在点击 Post TO GL 按钮...")
 
-        # 首先尝试使用指定的 div ID 和 innerText 查找
         script = """
             (function() {
                 var div = document.getElementById('ctl00_FastBusiness_MainReport_ToolbarButton_GLPost');
@@ -186,7 +216,6 @@ class PostingHandler:
             time.sleep(3)
             return True
 
-        # 回退到原来的选择器方式
         selectors = [
             "input[value*='Post TO GL']",
             "input[value*='Post To GL']",
@@ -204,7 +233,6 @@ class PostingHandler:
                 time.sleep(3)
                 return True
 
-        # 回退到通用的 JavaScript 查找方式
         script = """
             (function() {
                 var elements = document.querySelectorAll('input, button, a, div');
@@ -229,22 +257,22 @@ class PostingHandler:
         return False
 
     def has_more_records(self) -> bool:
+        """判断当前页面列表中是否仍有待过账记录。"""
         checkboxes = self.find_checkboxes_in_table()
         return len(checkboxes) > 0
 
     def wait_for_processing(self, timeout: int = 30) -> bool:
+        """轮询等待 FAST 后端过账完成并返回带有 Refresh 链接的 Post Transaction 页面。"""
         print("等待处理完成...")
         time.sleep(2)
 
         start_time = time.time()
         while time.time() - start_time < timeout:
-            # 检查页面中是否存在 a 标签包含 "Refresh" 文本，且 td 标签包含 "Post Transaction" 文本
             processing_complete = self.cdp.execute_script("""
                 (function() {
                     var hasRefresh = false;
                     var hasPostTransaction = false;
                     
-                    // 查找 a 标签下包含 "Refresh" 文本的元素
                     var links = document.querySelectorAll('a');
                     for (var i = 0; i < links.length; i++) {
                         var text = (links[i].innerText || links[i].textContent || '').trim();
@@ -254,7 +282,6 @@ class PostingHandler:
                         }
                     }
                     
-                    // 查找 td 标签内包含 "Post Transaction" 文本的元素
                     var tds = document.querySelectorAll('td');
                     for (var j = 0; j < tds.length; j++) {
                         var text = (tds[j].innerText || tds[j].textContent || '').trim();
@@ -264,7 +291,6 @@ class PostingHandler:
                         }
                     }
                     
-                    // 两个条件同时满足时，说明处理完成
                     return hasRefresh && hasPostTransaction;
                 })()
             """)
@@ -279,6 +305,14 @@ class PostingHandler:
         return False
 
     def process_posting(self) -> bool:
+        """
+        【1104 核心修复方法】
+        执行单批次全选并点击 Post to GL 过账：
+        1. 检查是否有待过账复选框记录；
+        2. 校验 `click_all_checkboxes()` 返回的勾选数量必须大于 0；
+        3. 校验 `click_post_to_gl_button()` 返回值，仅在返回 False 时才报告点击失败并退出；
+        4. 点击成功后等待 `wait_for_processing()` 完成过账并返回 True。
+        """
         if not self.has_more_records():
             print("没有更多需要过帐的记录")
             return False

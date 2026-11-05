@@ -47,6 +47,10 @@ from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor
 from typing import List, Dict, Set, Tuple, Optional, Callable, Any
 
+_PYDEPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pydeps")
+if os.path.isdir(_PYDEPS_DIR) and _PYDEPS_DIR not in sys.path:
+    sys.path.insert(0, _PYDEPS_DIR)
+
 import numpy as np
 import pandas as pd
 import openpyxl
@@ -104,6 +108,24 @@ def _fallback_yaml_load(text: str) -> Dict[str, Any]:
     return result
 
 
+def _fallback_yaml_dump(data: Dict[str, Any]) -> str:
+    """当环境未安装 PyYAML 时，提供纯 Python 结构化 YAML 序列化器，支持一级/二级字典输出。"""
+    lines: List[str] = []
+    for top_k, top_v in (data or {}).items():
+        if isinstance(top_v, dict):
+            lines.append(f"{top_k}:")
+            for sub_k, sub_v in top_v.items():
+                if isinstance(sub_v, dict):
+                    lines.append(f"  '{sub_k}':")
+                    for leaf_k, leaf_v in sub_v.items():
+                        lines.append(f"    '{leaf_k}': '{leaf_v}'")
+                else:
+                    lines.append(f"  '{sub_k}': '{sub_v}'")
+        else:
+            lines.append(f"{top_k}: '{top_v}'")
+    return "\n".join(lines) + "\n"
+
+
 # ==============================================================================
 # 1. 配置与状态管理模块
 # ==============================================================================
@@ -137,23 +159,34 @@ class AccountConfig:
         if new_config is not None:
             cls.config = new_config
         os.makedirs(os.path.dirname(cls.yaml_path), exist_ok=True)
-        if yaml:
-            with open(cls.yaml_path, "w", encoding="utf-8") as f:
+        with open(cls.yaml_path, "w", encoding="utf-8") as f:
+            if yaml:
                 yaml.safe_dump(cls.config, f, allow_unicode=True, sort_keys=False)
-        else:
-            raise RuntimeError("保存 YAML 需要安装 PyYAML: pip install pyyaml")
+            else:
+                f.write(_fallback_yaml_dump(cls.config))
 
 
 AccountConfig.load()
 
 
 class Config:
-    """兼容老项目 Config 及 upload_to_gl.py / post_to_gl.py 的 get_chrome_config()"""
+    """兼容老项目 Config 及 upload_to_gl.py / post_to_gl.py 的 get_chrome_config()（支持读取 fast_credentials.yaml）"""
     def __init__(self, config_path: Optional[str] = None):
         self.config = AccountConfig.load(config_path)
+        self.cred_path = os.path.join(BASE_DIR, "config", "fast_credentials.yaml")
 
     def get_chrome_config(self) -> Dict[str, Any]:
         chrome_cfg = self.config.get("chrome") or {}
+        cred_data: Dict[str, Any] = {}
+        if os.path.exists(self.cred_path):
+            try:
+                with open(self.cred_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                    cred_data = (yaml.safe_load(raw_text) if yaml else _fallback_yaml_load(raw_text)) or {}
+            except Exception:
+                cred_data = {}
+        fast_auth = cred_data.get("fast_auth") or {}
+        chrome_cdp = cred_data.get("chrome_cdp") or {}
         default_chrome = os.getenv(
             "CHROME_PATH",
             r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -161,17 +194,42 @@ class Config:
             else "/ms-playwright/chrome-headless-shell-linux64/chrome-headless-shell"
         )
         return {
-            "chrome_path": chrome_cfg.get("chrome_path", default_chrome),
-            "remote_debugging_port": int(chrome_cfg.get("remote_debugging_port", os.getenv("CHROME_PORT", "9222"))),
-            "max_retries": int(chrome_cfg.get("max_retries", 3)),
-            "close_browser_on_exit": bool(chrome_cfg.get("close_browser_on_exit", True)),
-            "fast_url": chrome_cfg.get(
-                "fast_url",
-                os.getenv("FAST_URL", "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx")
+            "chrome_path": os.getenv("CHROME_PATH") or chrome_cdp.get("chrome_path") or chrome_cfg.get("chrome_path", default_chrome),
+            "remote_debugging_port": int(
+                os.getenv("CHROME_PORT")
+                or chrome_cdp.get("remote_debugging_port")
+                or chrome_cfg.get("remote_debugging_port", 9222)
             ),
-            "fast_user": chrome_cfg.get("fast_user", os.getenv("FAST_USER", "")),
-            "fast_password": chrome_cfg.get("fast_password", os.getenv("FAST_PASSWORD", "")),
-            "fast_unit": chrome_cfg.get("fast_unit", os.getenv("FAST_UNIT", "CTY")),
+            "max_retries": int(chrome_cdp.get("max_retries") or chrome_cfg.get("max_retries", 3)),
+            "close_browser_on_exit": bool(
+                chrome_cdp.get("close_browser_on_exit", chrome_cfg.get("close_browser_on_exit", True))
+            ),
+            "fast_url": (
+                os.getenv("FAST_URL")
+                or fast_auth.get("login_url")
+                or chrome_cfg.get("fast_url")
+                or "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx"
+            ),
+            "fast_user": (
+                os.getenv("FAST_USER")
+                or fast_auth.get("username")
+                or chrome_cfg.get("fast_user", "")
+            ),
+            "fast_password": (
+                os.getenv("FAST_PASSWORD")
+                or fast_auth.get("password")
+                or chrome_cfg.get("fast_password", "")
+            ),
+            "fast_unit": (
+                os.getenv("FAST_UNIT")
+                or fast_auth.get("unit")
+                or chrome_cfg.get("fast_unit", "CTY")
+            ),
+            "fast_language": (
+                os.getenv("FAST_LANGUAGE")
+                or fast_auth.get("language")
+                or chrome_cfg.get("fast_language", "en")
+            ),
         }
 
 
@@ -2173,16 +2231,21 @@ def _perform_fast_login(
 ) -> bool:
     """
     执行 FAST 网页登录：
-    优先使用配置的 fast_user / fast_password / fast_unit 调用 LoginHandler.login() 自动填表登录；
+    优先使用配置的 fast_user / fast_password / fast_unit / fast_language 调用 LoginHandler.login() 自动切换英文并填表登录；
     若未配置账密或自动登录未成功，在交互式终端下优雅回退提示人工确认。
     """
     fast_user = str(config.get("fast_user") or "").strip()
     fast_password = str(config.get("fast_password") or "").strip()
     fast_unit = str(config.get("fast_unit") or "CTY").strip()
+    fast_language = str(config.get("fast_language") or "en").strip()
 
     if auto_login and fast_user and fast_password:
-        logger.info(f"正在执行 FAST 自动填表登录 (账号: {fast_user}, 单位: {fast_unit})...")
-        if login_handler.login(fast_user, fast_password, fast_unit):
+        logger.info(f"正在执行 FAST 自动填表登录 (账号: {fast_user}, 单位: {fast_unit}, 界面语言: {fast_language})...")
+        try:
+            login_ok = login_handler.login(fast_user, fast_password, fast_unit, fast_language)
+        except TypeError:
+            login_ok = login_handler.login(fast_user, fast_password, fast_unit)
+        if login_ok:
             logger.info("FAST 网页自动登录验证通过！")
             return True
         logger.warning("FAST 自动填表登录未能确认跳转，准备检查或切换人工确认...")
@@ -2190,6 +2253,8 @@ def _perform_fast_login(
         if not login_handler.navigate_to_login():
             logger.error("导航到登录页面失败")
             return False
+        if hasattr(login_handler, "switch_language"):
+            login_handler.switch_language(fast_language)
 
     if interactive_fallback and sys.stdin and sys.stdin.isatty():
         logger.info("请确认完成 FAST 网页登录，按 Enter 键继续...")
@@ -2199,7 +2264,7 @@ def _perform_fast_login(
     if fast_user and fast_password:
         return login_handler.is_logged_in()
 
-    logger.error("未提供 FAST_USER / FAST_PASSWORD 且当前为非交互模式，无法完成登录。")
+    logger.error("未提供 FAST_USER / FAST_PASSWORD 且当前为非交互模式，请在 config/fast_credentials.yaml 或 .env 中配置账密。")
     return False
 
 

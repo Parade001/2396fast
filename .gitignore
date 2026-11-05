@@ -1,26 +1,43 @@
-# 环境与敏感信息
+# ==============================================================================
+# SAP2FAST 项目 Git 忽略规则 (.gitignore)
+# 确保第三方依赖、浏览器自动化缓存、日志与运行产出不会污染 Git 提交记录
+# ==============================================================================
+
+# 1. 环境与敏感凭据信息
 .env
+config/fast_credentials.local.yaml
 .venv/
 venv/
 env/
 ENV/
 
-# Python 缓存
+# 2. 本地 Python 依赖缓存与虚拟环境（严禁提交至 Git）
+.pydeps/
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 .mypy_cache/
-
-# 依赖包目录（如果是本地文件夹形式的库）
+.ruff_cache/
+build/
+dist/
+*.egg-info/
 外部库/
 
-# 输出与日志
-output/
-*.log
-*.csv  # 如果 csv 都是运行结果，可以加上；如果是必要数据请删除这行
+# 3. 浏览器自动化与 AI Studio 预览缓存
+.playwright-cli/
+.aistudio/
+chrome-user-data/
 
-# 操作系统与 IDE
+# 4. 运行期输出、审计日志与临时状态文件
+output/
+logs/
+*.log
+data/so_ct_registry.json
+config/*.bak*
+*.tmp
+
+# 5. 操作系统与 IDE 缓存
 .DS_Store
 Thumbs.db
 .idea/

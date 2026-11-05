@@ -1,3 +1,14 @@
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+文件名称: tests/new-althority.py
+模块定位: SAP HANA 单月凭证抽取与 DataProcessor 转换联调测试脚本
+================================================================================
+【本文件核心作用】
+用于在内网环境下连接 SAP HANA，抽取 2390 公司指定期间的 `bkpf` / `bseg` 凭证分录，
+通过 `DataProcessor.run(df)` 验证转换结果并导出 `bkpf.xlsx`。
+================================================================================
+"""
 from database import HANAConnector
 from utils import DataProcessor
 import pandas as pd

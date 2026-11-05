@@ -1,3 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+文件名称: utils/__init__.py
+模块定位: 工具函数、DataFrame 转换器、43 列模板导出器与浏览器自动化组件统一导出包
+================================================================================
+【本文件核心作用】
+1. 导出核心数据处理与导出工具：`DataProcessor`、`export_to_sap`、`update_voucher_no`、
+   `check_exist_voucher_no`、`resolve_period_date`、`fiscalym_to_calendarym`、`setup_logger`；
+2. 惰性安全导出浏览器自动化组件：`ChromeLauncher`、`CDPClient`、`LoginHandler`、
+   `UploadHandler`、`PostingHandler`。
+================================================================================
+"""
 from utils.general import (
     resolve_period_date,
     get_next_fast_date,
