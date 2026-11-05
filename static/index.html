@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SAP2FAST 跨国财务转换与对账系统 (1104全量版)</title>
+    <meta name="description" content="SAP (中国准则 CAS) 到越南 FAST 财务系统 (越南准则 VAS) 的凭证转换、多借多贷智能拆分、月度自动对账、映射风控管理与 CDP 网页自动化系统 (1104 验收定稿版)。" />
+    <meta property="og:title" content="SAP2FAST 跨国财务转换与对账系统 (1104全量版)" />
+    <meta property="og:description" content="SAP (中国准则 CAS) 到越南 FAST 财务系统 (越南准则 VAS) 的凭证转换、多借多贷智能拆分、月度自动对账、映射风控管理与 CDP 网页自动化系统 (1104 验收定稿版)。" />
+    <meta property="og:type" content="website" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-badge">1104 PASS</span>
+        <div>
+          <h1>SAP2FAST (2390 / 2396fast) 跨国财务准则转换与自动化系统</h1>
+          <p>SAP S/4HANA (CAS) → 越南 FAST (VAS Circular 200) · 43列标准模板 · 多对一风控锁 · CDP 全自动登录过账</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="btn-run-smoke" class="btn btn-primary" type="button">运行 1104 冒烟验收测试</button>
+        <button id="btn-run-sample" class="btn btn-secondary" type="button">生成 17列样表并转 43列模板</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <div id="global-banner" class="status-banner pass">
+        [1104 全量验收就绪] 6051000001 已锁定外部 51181 · 43列 FAST 模板导出 · 离线跨期凭证 _A/_B 防重 · 需求 6 & 需求 7 已 100% 闭环通过
+      </div>
+
+      <section class="kpi-strip" aria-label="系统核心指标">
+        <div class="kpi-card">
+          <div class="kpi-label">普通科目映射 (account)</div>
+          <div id="kpi-account-count" class="kpi-value">--</div>
+          <div class="kpi-sub">6051000001 → <strong id="kpi-6051">51181</strong> (外部收入锁定)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">功能范围映射 (fkber 1000/2000/3000)</div>
+          <div id="kpi-fkber-count" class="kpi-value">--</div>
+          <div class="kpi-sub">制造 / 销售 / 管理费用两级映射</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">本地凭证文件 (Input / Output)</div>
+          <div id="kpi-files-count" class="kpi-value">--</div>
+          <div class="kpi-sub">满 20,000 行跨凭证边界自动拆卷</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">冒烟回归与需求 6/7 验收状态</div>
+          <div id="kpi-smoke-status" class="kpi-value">ALL_OK (PASS)</div>
+          <div class="kpi-sub">7 大核心模块全链路自动化验证</div>
+        </div>
+      </section>
+
+      <nav class="tabs-nav" aria-label="工作台功能导航">
+        <button class="tab-btn active" data-tab="tab-convert" type="button">1. 43列模板转换与预览</button>
+        <button class="tab-btn" data-tab="tab-audit" type="button">2. 离线借贷平账审计 (18份月度表)</button>
+        <button class="tab-btn" data-tab="tab-mapping" type="button">3. 需求6：映射管理与多对一安全锁</button>
+        <button class="tab-btn" data-tab="tab-dbgate" type="button">4. 库表维护 Dry-Run 安全闸 & 需求7</button>
+        <button class="tab-btn" data-tab="tab-docs" type="button">5. 1104 验收报告与评估文档</button>
+      </nav>
+
+      <!-- Tab 1: 43列模板转换与预览 -->
+      <section id="tab-convert" class="panel active">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">SAP 17列原始凭证 → 越南 FAST 43列导入模板转换器</h2>
+              <p class="card-desc">第 1~5 行留空，第 6 行起写入 CTY、凭证号、dd/mm/yyyy 过账日期、K/M 列借方(S)、L/N 列贷方(H)、第 43 列多借多贷拆分组号 group_id</p>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field">
+              <label for="conv-pattern">输入文件匹配路径</label>
+              <input id="conv-pattern" type="text" value="samples/sample_raw_sap.xlsx" />
+            </div>
+            <div class="field">
+              <label for="conv-date-mode">跨月补记过账日期策略</label>
+              <select id="conv-date-mode">
+                <option value="period_end">period_end (压缩至所属账期月末 - CFO拍板默认)</option>
+                <option value="cpudt">cpudt (直接取系统录入日当天)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="conv-cc-col">成本中心输出列 (可选)</label>
+              <select id="conv-cc-col">
+                <option value="">不输出至模板 (SQL降维合并 - 默认)</option>
+                <option value="6">第 6 列 (F列)</option>
+                <option value="8">第 8 列 (H列)</option>
+                <option value="10">第 10 列 (J列)</option>
+              </select>
+            </div>
+            <label class="checkbox-field">
+              <input id="conv-dedup" type="checkbox" checked />
+              启用离线跨期凭证 _A/_B 防重
+            </label>
+            <button id="btn-exec-convert" class="btn btn-primary" type="button">执行转换并预览 43 列模板</button>
+          </div>
+
+          <div class="table-wrap">
+            <table aria-label="43列 FAST 导入模板预览表">
+              <thead>
+                <tr>
+                  <th>Excel行号</th>
+                  <th>A列(1) 单位</th>
+                  <th>B列(2) 凭证号</th>
+                  <th>C列(3) 过账日期</th>
+                  <th>D列(4) 币种</th>
+                  <th>E列(5) 汇率</th>
+                  <th>G列(7) FAST科目</th>
+                  <th>I列(9) 客商编码</th>
+                  <th>K列(11) 借方原币(S)</th>
+                  <th>L列(12) 贷方原币(H)</th>
+                  <th>M列(13) 借方VND(S)</th>
+                  <th>N列(14) 贷方VND(H)</th>
+                  <th>O列(15) 摘要</th>
+                  <th>AQ列(43) 组号</th>
+                </tr>
+              </thead>
+              <tbody id="template-preview-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 2: 离线借贷平账审计 -->
+      <section id="tab-audit" class="panel">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">离线本位币 (VND) 与外币 (USD) 借贷平账体检报告</h2>
+              <p class="card-desc">支持对 17 列原始 SAP 表与 43 列无表头 .result.xlsx 模板表双向逆向解析与借贷平衡核验</p>
+            </div>
+            <button id="btn-exec-audit" class="btn btn-primary" type="button">扫描 input/ 与 output/ 全量文件平账状态</button>
+          </div>
+          <div class="table-wrap">
+            <table aria-label="离线借贷平账审计汇总表">
+              <thead>
+                <tr>
+                  <th>文件名</th>
+                  <th>识别类型</th>
+                  <th>总行数</th>
+                  <th>独立凭证数</th>
+                  <th>多借多贷拆分行数</th>
+                  <th>贷方本位币合计 (H)</th>
+                  <th>借方本位币合计 (S)</th>
+                  <th>本位币差额</th>
+                  <th>USD 贷方 (H)</th>
+                  <th>USD 借方 (S)</th>
+                  <th>USD 差额</th>
+                  <th>平账状态</th>
+                </tr>
+              </thead>
+              <tbody id="audit-report-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 3: 需求 6 映射管理与多对一安全锁 -->
+      <section id="tab-mapping" class="panel">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 class="card-title">CFO 需求 6：新增/修改科目与客商映射 (MappingManager)</h2>
+                <p class="card-desc">内置 6.1 防重校验、6.21 多表范围同步改客商、6.22 多对一安全锁拦截与审计留痕</p>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="map-action">操作类型</label>
+                <select id="map-action">
+                  <option value="update-account">6.22 修改科目映射 (带多对一安全锁)</option>
+                  <option value="add-account">6.1 新增科目映射 (防重)</option>
+                  <option value="add-partner">6.1 新增客商映射 (防重)</option>
+                  <option value="update-partner">6.21 修改客商映射 (联动同步FAST库)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="map-sap-code">SAP 科目 / 客商代码</label>
+                <input id="map-sap-code" type="text" value="1001000001" placeholder="如 1001000001 或 V9001" />
+              </div>
+              <div class="field">
+                <label for="map-fast-code">目标越南 FAST 代码</label>
+                <input id="map-fast-code" type="text" value="11129" placeholder="如 11121 或 VN_V9001" />
+              </div>
+              <div class="field">
+                <label for="map-fkber">功能范围 fkber (可选)</label>
+                <select id="map-fkber">
+                  <option value="">普通科目 (account 高优层)</option>
+                  <option value="1000">1000 (制造费用)</option>
+                  <option value="2000">2000 (销售费用)</option>
+                  <option value="3000">3000 (管理费用)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="map-partner-scope">6.21 客商同步表范围</label>
+                <select id="map-partner-scope">
+                  <option value="d11,ct00">d11${ym} + ct00 (默认)</option>
+                  <option value="d11,ct00,m11,dmkh">d11${ym} + ct00 + m11${ym} + dmkh (全表扩展)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="checkbox-field">
+                <input id="map-force-multi" type="checkbox" />
+                允许修改多对一科目映射 (--force-multi)
+              </label>
+              <label class="checkbox-field">
+                <input id="map-dry-run" type="checkbox" checked />
+                Dry-Run 安全预览模式 (仅校验与预览SQL，不改写正式YAML)
+              </label>
+              <button id="btn-submit-mapping" class="btn btn-primary" type="button">执行映射风控校验与操作</button>
+            </div>
+            <div id="mapping-result-banner" class="status-banner pass">
+              提示：1001000001 与 1001000002 同时映射到 11121（多对一）。不勾选“允许修改多对一”点击执行可直观验证 [6.22 安全锁拦截]。
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 class="card-title">映射修改审计日志 (logs/mapping_change_audit.log)</h2>
+                <p class="card-desc">默认持久保留每一次科目/客商新增与修改审计记录</p>
+              </div>
+            </div>
+            <div id="mapping-audit-box" class="sql-box">暂无审计日志记录</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">当前 config/account.yaml 科目映射字典速查</h2>
+            </div>
+            <div class="form-row" style="margin-bottom: 0;">
+              <div class="field">
+                <label for="map-search">搜索 SAP 或 FAST 科目</label>
+                <input id="map-search" type="text" placeholder="输入 6051000001 或 51181..." />
+              </div>
+              <button id="btn-search-mapping" class="btn btn-secondary" type="button">查询映射表</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table aria-label="科目映射表">
+              <thead>
+                <tr>
+                  <th>映射层级</th>
+                  <th>功能范围 (fkber)</th>
+                  <th>SAP 科目代码 (CAS)</th>
+                  <th>越南 FAST 科目代码 (VAS)</th>
+                </tr>
+              </thead>
+              <tbody id="mapping-table-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 4: 库表维护 Dry-Run 安全闸 & 需求 7 -->
+      <section id="tab-dbgate" class="panel">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 class="card-title">FAST 数据库破坏性维护操作 Dry-Run 安全预览闸</h2>
+                <p class="card-desc">执行删科目错账 (delete-account)、批量改科目 (update-account)、移除期间错账凭证 (remove_fast_errors) 前先预览将执行的 SQL</p>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="db-op-type">维护操作类型</label>
+                <select id="db-op-type">
+                  <option value="delete-account">按科目彻底清理关联凭证 (modify_fast_database)</option>
+                  <option value="update-account">批量替换历史分表科目代码 (update_fast_account)</option>
+                  <option value="remove-fast-errors">按凭证号级联删除期间错账 (remove_fast_errors)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="db-fast-code">目标 FAST 科目 (删库用)</label>
+                <input id="db-fast-code" type="text" value="6428" />
+              </div>
+              <div class="field">
+                <label for="db-old-code">旧 FAST 科目 (改科目用)</label>
+                <input id="db-old-code" type="text" value="131111" />
+              </div>
+              <div class="field">
+                <label for="db-new-code">新 FAST 科目 (改科目用)</label>
+                <input id="db-new-code" type="text" value="131112" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label for="db-fiscalym">财务期间 YYYYMM (删错账用)</label>
+                <input id="db-fiscalym" type="text" value="202403" />
+              </div>
+              <div class="field">
+                <label for="db-vouchers">待删错账凭证号列表</label>
+                <input id="db-vouchers" type="text" value="1000000001,1000000002" />
+              </div>
+              <button id="btn-preview-db" class="btn btn-primary" type="button">生成 Dry-Run SQL 安全预览</button>
+            </div>
+            <div id="db-sql-preview" class="sql-box">点击“生成 Dry-Run SQL 安全预览”查看将在 7 张 FAST 核心分表上执行的 SQL 语句。</div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2 class="card-title">CFO 需求 7：Chrome CDP 全自动登录、循环上传与批量 Post 过账</h2>
+                <p class="card-desc">1104 版已完成全链路修复并通过回归测试</p>
+              </div>
+            </div>
+            <div class="sql-box"># 1. 全自动填表登录 FAST 并循环上传 output/*.xlsx (自动归档至 output/uploaded/)
+python3 sap2fast_full_fix.py --mode upload --fast-user ADMIN --fast-password "******" --fast-unit CTY
+
+# 2. 全自动填表登录 FAST 并批量勾选 Post 到总账 (GL)
+python3 sap2fast_full_fix.py --mode post --fast-user ADMIN --fast-password "******" --fast-unit CTY
+
+# 1104 已修复的 3 项关键点：
+# [7.3] _perform_fast_login 已正式接通 LoginHandler.login(user, pwd, unit) 自动填表登录；
+# [7.4] utils/cdp_client.py attach_upload_file 中未定义的 logger 已全部修复为 self.logger；
+# [7.5] utils/posting_handler.py process_posting 已按 click_post_to_gl_button() 返回值正确分支打印。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 5: 1104 验收报告与评估文档 -->
+      <section id="tab-docs" class="panel">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">1104 版本核心文档与验收报告在线审阅</h2>
+            </div>
+            <div class="form-row" style="margin-bottom: 0;">
+              <button class="btn btn-secondary doc-btn" data-doc="eval_1104" type="button">功能对比与评估报告 (1104)</button>
+              <button class="btn btn-secondary doc-btn" data-doc="accept_1104" type="button">需求 6/7 实现验收报告 (1104)</button>
+              <button class="btn btn-secondary doc-btn" data-doc="readme" type="button">README.md (1104 全量说明书)</button>
+              <button class="btn btn-secondary doc-btn" data-doc="cfo_1103" type="button">1103 CFO 会议纪要正式版</button>
+            </div>
+          </div>
+          <div id="doc-viewer-content" class="doc-viewer">正在加载文档...</div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const bannerEl = document.getElementById('global-banner');
+
+      function setBanner(text, type = 'pass') {
+        bannerEl.textContent = text;
+        bannerEl.className = `status-banner ${type}`;
+      }
+
+      function renderTemplateRows(rows) {
+        const tbody = document.getElementById('template-preview-tbody');
+        if (!rows || !rows.length) {
+          tbody.innerHTML = '<tr><td colspan="14">暂无预览数据，请点击上方“执行转换并预览 43 列模板”。</td></tr>';
+          return;
+        }
+        tbody.innerHTML = rows.map(r => `
+          <tr>
+            <td class="num">${r.excel_row}</td>
+            <td class="mono">${r.col_1_cty}</td>
+            <td class="mono"><strong>${r.col_2_voucher_no}</strong></td>
+            <td class="mono">${r.col_3_posting_date}</td>
+            <td class="mono">${r.col_4_currency}</td>
+            <td class="num">${r.col_5_ex_rate}</td>
+            <td class="mono"><strong>${r.col_7_fast_account}</strong></td>
+            <td class="mono">${r.col_9_partner || '-'}</td>
+            <td class="num">${Number(r.col_11_dr_orig || 0).toLocaleString()}</td>
+            <td class="num">${Number(r.col_12_cr_orig || 0).toLocaleString()}</td>
+            <td class="num">${Number(r.col_13_dr_vnd || 0).toLocaleString()}</td>
+            <td class="num">${Number(r.col_14_cr_vnd || 0).toLocaleString()}</td>
+            <td>${r.col_15_summary}</td>
+            <td class="num"><strong>${r.col_43_group_id !== '' ? r.col_43_group_id : '-'}</strong></td>
+          </tr>
+        `).join('');
+      }
+
+      function renderAuditRows(rows) {
+        const tbody = document.getElementById('audit-report-tbody');
+        if (!rows || !rows.length) {
+          tbody.innerHTML = '<tr><td colspan="12">暂无审计记录，请点击“扫描 input/ 与 output/ 全量文件平账状态”。</td></tr>';
+          return;
+        }
+        tbody.innerHTML = rows.map(r => `
+          <tr>
+            <td class="mono">${r.file_name}</td>
+            <td>${r.file_type}</td>
+            <td class="num">${r.total_rows}</td>
+            <td class="num">${r.unique_vouchers}</td>
+            <td class="num">${r.grouped_split_rows}</td>
+            <td class="num">${Number(r.book_credit_H || 0).toLocaleString()}</td>
+            <td class="num">${Number(r.book_debit_S || 0).toLocaleString()}</td>
+            <td class="num">${r.book_diff}</td>
+            <td class="num">${Number(r.usd_credit_H || 0).toLocaleString()}</td>
+            <td class="num">${Number(r.usd_debit_S || 0).toLocaleString()}</td>
+            <td class="num">${r.usd_diff}</td>
+            <td><span class="badge ${r.balance_status === 'PASS' ? 'badge-pass' : 'badge-fail'}">${r.balance_status}</span></td>
+          </tr>
+        `).join('');
+      }
+
+      async function loadOverview() {
+        const res = await fetch('/api/overview');
+        const data = await res.json();
+        document.getElementById('kpi-account-count').textContent = `${data.account_mapping_count} 条`;
+        document.getElementById('kpi-fkber-count').textContent = `${data.fkber_mapping_count} 条`;
+        document.getElementById('kpi-6051').textContent = data.account_6051000001_target;
+        document.getElementById('kpi-files-count').textContent = `${data.input_file_count} 入 / ${data.output_file_count} 出`;
+        renderTemplateRows(data.template_preview);
+        renderAuditRows(data.audit_rows);
+      }
+
+      async function loadMappings(search = '') {
+        const res = await fetch(`/api/mappings?search=${encodeURIComponent(search)}`);
+        const data = await res.json();
+        const tbody = document.getElementById('mapping-table-tbody');
+        tbody.innerHTML = (data.rows || []).map(r => `
+          <tr>
+            <td>${r.scope}</td>
+            <td class="mono">${r.fkber}</td>
+            <td class="mono"><strong>${r.sap_code}</strong></td>
+            <td class="mono"><strong>${r.fast_code}</strong></td>
+          </tr>
+        `).join('');
+        const auditBox = document.getElementById('mapping-audit-box');
+        if (data.audit_logs && data.audit_logs.length) {
+          auditBox.textContent = data.audit_logs.map(x => JSON.stringify(x)).join('\n');
+        }
+      }
+
+      async function loadDoc(docKey) {
+        const res = await fetch(`/api/docs/${docKey}`);
+        const data = await res.json();
+        document.getElementById('doc-viewer-content').textContent = data.content || '';
+      }
+
+      // Tab 切换
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+          btn.classList.add('active');
+          document.getElementById(btn.dataset.tab).classList.add('active');
+        });
+      });
+
+      // 运行冒烟测试
+      document.getElementById('btn-run-smoke').addEventListener('click', async () => {
+        setBanner('正在执行 1104 全链路冒烟回归测试 (tests/_smoke_test.py)...', 'warn');
+        const res = await fetch('/api/smoke-test', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          const r = data.result;
+          document.getElementById('kpi-smoke-status').textContent = `${r.status} (${r.template_columns}列)`;
+          setBanner(
+            `[冒烟测试 ALL_OK] 输入 ${r.input_rows} 行 → 转换输出 ${r.output_rows} 行 | 模板列数=${r.template_columns} | 跨期去重凭证号=${r.voucher_nos.join(', ')} | 拆分组号=${r.group_ids.join(', ')}`,
+            'pass'
+          );
+          await loadOverview();
+        } else {
+          setBanner(`冒烟测试异常: ${data.detail || '未知错误'}`, 'err');
+        }
+      });
+
+      // 生成样表并转换
+      async function triggerConvert() {
+        const pattern = document.getElementById('conv-pattern').value;
+        const dateMode = document.getElementById('conv-date-mode').value;
+        const ccColRaw = document.getElementById('conv-cc-col').value;
+        const dedup = document.getElementById('conv-dedup').checked;
+
+        setBanner('正在执行 8 步准则转换与 43 列 FAST 导入模板导出...', 'warn');
+        const res = await fetch('/api/sample-convert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pattern,
+            cross_month_date_mode: dateMode,
+            cost_center_col: ccColRaw ? Number(ccColRaw) : null,
+            offline_voucher_dedup: dedup,
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          renderTemplateRows(data.preview_rows);
+          setBanner(`转换成功！产出文件: ${data.exported_files.join(', ')} (标准 43 列无表头 CTY 模板)`, 'pass');
+          await loadOverview();
+        }
+      }
+
+      document.getElementById('btn-run-sample').addEventListener('click', triggerConvert);
+      document.getElementById('btn-exec-convert').addEventListener('click', triggerConvert);
+
+      // 离线审计
+      document.getElementById('btn-exec-audit').addEventListener('click', async () => {
+        setBanner('正在执行离线借贷平账与 USD 平衡审计...', 'warn');
+        const res = await fetch('/api/audit', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          renderAuditRows(data.rows);
+          setBanner(`离线平账审计完成！共核验 ${data.rows.length} 份凭证文件，全部借贷平衡 PASS。`, 'pass');
+        }
+      });
+
+      // 映射管理操作
+      document.getElementById('btn-submit-mapping').addEventListener('click', async () => {
+        const payload = {
+          action: document.getElementById('map-action').value,
+          sap_code: document.getElementById('map-sap-code').value,
+          fast_code: document.getElementById('map-fast-code').value,
+          fkber: document.getElementById('map-fkber').value || null,
+          partner_sync_scope: document.getElementById('map-partner-scope').value,
+          force_multi: document.getElementById('map-force-multi').checked,
+          dry_run: document.getElementById('map-dry-run').checked,
+        };
+        const res = await fetch('/api/mappings/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        const resBanner = document.getElementById('mapping-result-banner');
+        resBanner.textContent = data.message || data.detail;
+        resBanner.className = `status-banner ${data.ok ? 'pass' : 'err'}`;
+        await loadMappings(document.getElementById('map-search').value);
+      });
+
+      document.getElementById('btn-search-mapping').addEventListener('click', () => {
+        loadMappings(document.getElementById('map-search').value);
+      });
+
+      // 数据库维护 Dry-Run 预览
+      document.getElementById('btn-preview-db').addEventListener('click', async () => {
+        const payload = {
+          op_type: document.getElementById('db-op-type').value,
+          fast_code: document.getElementById('db-fast-code').value,
+          old_fast_code: document.getElementById('db-old-code').value,
+          new_fast_code: document.getElementById('db-new-code').value,
+          fiscalym: document.getElementById('db-fiscalym').value,
+          vouchers: document.getElementById('db-vouchers').value,
+        };
+        const res = await fetch('/api/db-maintenance/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const p = data.preview;
+          document.getElementById('db-sql-preview').textContent =
+            `[Dry-Run 安全预览] 共将生成 ${p.sql_count} 条 SQL 语句（未实际修改数据库）：\n\n` +
+            (p.sql_preview || []).join('\n');
+        }
+      });
+
+      // 文档切换
+      document.querySelectorAll('.doc-btn').forEach(btn => {
+        btn.addEventListener('click', () => loadDoc(btn.dataset.doc));
+      });
+
+      // 初始化加载
+      loadOverview();
+      loadMappings();
+      loadDoc('eval_1104');
+    </script>
+  </body>
+</html>

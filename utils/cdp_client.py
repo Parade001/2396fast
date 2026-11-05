@@ -209,81 +209,75 @@ class CDPClient:
 
         return False
 
-    def attach_upload_file(self,  file_path: str='') -> bool:
+    def attach_upload_file(self, file_path: str = '') -> bool:
         import os
-        
+
         # 检查文件路径是否存在
         if not os.path.exists(file_path):
-            logger.error(f"文件不存在: {file_path}")
+            self.logger.error(f"文件不存在: {file_path}")
             return False
-        
+
         # 检查WebSocket连接
         if not self.ws:
-            logger.error("WebSocket 未连接")
+            self.logger.error("WebSocket 未连接")
             return False
-        
+
         try:
             # 启用DOM域
             self.send_command("DOM.enable")
             time.sleep(1)
             # 获取文档根节点
             doc_result = self.send_command("DOM.getDocument", {"depth": -1, "pierce": True})
-        
+
             if not doc_result:
-                logger.error("获取文档根节点失败: 未收到响应")
+                self.logger.error("获取文档根节点失败: 未收到响应")
                 return False
             if "error" in doc_result:
-                logger.error(f"获取文档根节点失败: {doc_result['error']}")
+                self.logger.error(f"获取文档根节点失败: {doc_result['error']}")
                 return False
             if "result" not in doc_result:
-                logger.error(f"获取文档根节点失败: 响应中缺少result字段，响应内容: {doc_result}")
+                self.logger.error(f"获取文档根节点失败: 响应中缺少result字段，响应内容: {doc_result}")
                 return False
             if "root" not in doc_result["result"]:
-                logger.error(f"获取文档根节点失败: 响应中缺少root字段，响应内容: {doc_result}")
+                self.logger.error(f"获取文档根节点失败: 响应中缺少root字段，响应内容: {doc_result}")
                 return False
             if "nodeId" not in doc_result["result"]["root"]:
-                logger.error(f"获取文档根节点失败: 响应中缺少nodeId字段，响应内容: {doc_result}")
+                self.logger.error(f"获取文档根节点失败: 响应中缺少nodeId字段，响应内容: {doc_result}")
                 return False
-            
-            # root_node_id = doc_result["result"]["root"]["nodeId"]
-            
+
             # 查询文件上传输入框节点
-            # 使用 Runtime.evaluate 执行 JavaScript 来获取文件上传控件
             evaluate_result = self.send_command("Runtime.evaluate", {
-                "expression": "document.querySelector('#fileupload')",
+                "expression": "document.querySelector('#fileupload') || document.querySelector('input[type=\"file\"]')",
                 "returnByValue": False
             })
-            
+
             if not evaluate_result:
-                logger.error("查询文件上传输入框失败: 未收到响应")
+                self.logger.error("查询文件上传输入框失败: 未收到响应")
                 return False
             if "error" in evaluate_result:
-                logger.error(f"查询文件上传输入框失败: {evaluate_result['error']}")
+                self.logger.error(f"查询文件上传输入框失败: {evaluate_result['error']}")
                 return False
             if "result" not in evaluate_result:
-                logger.error(f"查询文件上传输入框失败: 响应中缺少result字段，响应内容: {evaluate_result}")
+                self.logger.error(f"查询文件上传输入框失败: 响应中缺少result字段，响应内容: {evaluate_result}")
                 return False
             if "result" not in evaluate_result["result"] or "objectId" not in evaluate_result["result"]["result"]:
-                logger.error("未找到文件上传输入框或响应中缺少objectId字段")
+                self.logger.error("未找到文件上传输入框或响应中缺少objectId字段")
                 return False
-            
+
             object_id = evaluate_result["result"]["result"]["objectId"]
-            
-            logger.info(f"找到文件上传控件，objectId: {object_id}")
-            
+            self.logger.info(f"找到文件上传控件，objectId: {object_id}")
+
             # 设置文件到文件上传控件
-            
             self.send_command("DOM.setFileInputFiles", {
                 "files": [file_path],
                 "objectId": object_id
             })
-            
-            logger.info(f"已设置文件: {file_path}")
-                      
+
+            self.logger.info(f"已设置文件: {file_path}")
             return True
-            
+
         except Exception as e:
-            logger.error(f"发生错误: {e}")
+            self.logger.error(f"发生错误: {e}")
             return False    
 
     def close(self):
