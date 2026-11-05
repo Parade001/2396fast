@@ -55,13 +55,20 @@ def ensure_runtime_deps() -> None:
         ("numpy", "cp310-cp310-manylinux_2_17_x86_64"),
         ("pandas", "cp310-cp310-manylinux_2_17_x86_64"),
     ]
+    # 先以 1.5 秒超短超时探测 PyPI 是否可达，离线环境立即跳过，避免阻塞
+    try:
+        with urllib.request.urlopen("https://pypi.org/pypi/six/json", timeout=1.5) as _:
+            pass
+    except Exception:
+        return
+
     for pkg_name, tag in pkgs:
         try:
-            with urllib.request.urlopen(f"https://pypi.org/pypi/{pkg_name}/json", timeout=10) as resp:
+            with urllib.request.urlopen(f"https://pypi.org/pypi/{pkg_name}/json", timeout=3) as resp:
                 meta = json.loads(resp.read())
             urls = [u["url"] for u in meta.get("urls", []) if tag in u.get("filename", "")]
             if urls:
-                with urllib.request.urlopen(urls[0], timeout=20) as w_resp:
+                with urllib.request.urlopen(urls[0], timeout=8) as w_resp:
                     zipfile.ZipFile(io.BytesIO(w_resp.read())).extractall(_EXT_PYDEPS)
         except Exception:
             pass

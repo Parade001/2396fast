@@ -30,12 +30,41 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional
-from utils import CDPClient, setup_logger
+from utils.logger import setup_logger
+try:
+    from utils.cdp_client import CDPClient
+except ImportError:
+    CDPClient = Any  # type: ignore
 
 try:
     import yaml
 except ImportError:
     yaml = None
+
+
+def _parse_yaml_with_fallback(text: str) -> Dict[str, Any]:
+    if yaml is not None:
+        return yaml.safe_load(text) or {}
+    result: Dict[str, Any] = {}
+    curr_section: Optional[str] = None
+    for raw_line in text.splitlines():
+        s = raw_line.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        k, v = s.split(":", 1)
+        k = k.strip().strip("'\"")
+        v = v.strip()
+        if v.startswith(("'", '"')) and v.endswith(("'", '"')) and len(v) >= 2:
+            v = v[1:-1]
+        elif "#" in v:
+            v = v.split("#", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            curr_section = k
+            result[curr_section] = {} if v == "" else v
+        elif curr_section and isinstance(result.get(curr_section), dict):
+            result[curr_section][k] = v
+    return result
 
 
 def load_fast_credentials(config_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -48,24 +77,24 @@ def load_fast_credentials(config_dir: Optional[str] = None) -> Dict[str, Any]:
     account_yaml_path = base_dir / "account.yaml"
 
     cred_data: Dict[str, Any] = {}
-    if cred_yaml_path.exists() and yaml is not None:
+    if cred_yaml_path.exists():
         try:
             with open(cred_yaml_path, "r", encoding="utf-8") as f:
-                cred_data = yaml.safe_load(f) or {}
+                cred_data = _parse_yaml_with_fallback(f.read())
         except Exception:
             cred_data = {}
 
     acc_chrome: Dict[str, Any] = {}
-    if account_yaml_path.exists() and yaml is not None:
+    if account_yaml_path.exists():
         try:
             with open(account_yaml_path, "r", encoding="utf-8") as f:
-                acc_all = yaml.safe_load(f) or {}
+                acc_all = _parse_yaml_with_fallback(f.read())
                 acc_chrome = acc_all.get("chrome") or {}
         except Exception:
             acc_chrome = {}
 
-    fast_auth = cred_data.get("fast_auth") or {}
-    chrome_cdp = cred_data.get("chrome_cdp") or {}
+    fast_auth = cred_data.get("fast_auth") if isinstance(cred_data.get("fast_auth"), dict) else {}
+    chrome_cdp = cred_data.get("chrome_cdp") if isinstance(cred_data.get("chrome_cdp"), dict) else {}
     selectors = cred_data.get("selectors") or {}
 
     login_url = (

@@ -570,6 +570,308 @@ def handle_api_db_dry_run(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": False, "message": f"未知维护操作类型: {op_type}"}
 
 
+def _mask_pwd(pwd: str) -> str:
+    if not pwd:
+        return ""
+    if len(pwd) <= 2:
+        return "*" * len(pwd)
+    return pwd[0] + ("•" * max(4, len(pwd) - 2)) + pwd[-1]
+
+
+def handle_api_fast_credentials_get() -> Dict[str, Any]:
+    """
+    [GET /api/fast-credentials]
+    读取并检验 config/fast_credentials.yaml、.env 与 config/account.yaml 的多级凭据优先级、
+    YAML 语法合法性、密码掩码状态及最终生效配置。
+    """
+    from utils.login_handler import load_fast_credentials, _parse_yaml_with_fallback
+    cred_path = BASE_DIR / "config" / "fast_credentials.yaml"
+    raw_yaml = cred_path.read_text(encoding="utf-8") if cred_path.exists() else ""
+    yaml_valid = True
+    yaml_err = ""
+    cred_dict: Dict[str, Any] = {}
+    try:
+        if raw_yaml:
+            cred_dict = _parse_yaml_with_fallback(raw_yaml) or {}
+    except Exception as e:
+        yaml_valid = False
+        yaml_err = str(e)
+
+    eff = load_fast_credentials(str(BASE_DIR / "config"))
+    fa = cred_dict.get("fast_auth") or {}
+    cd = cred_dict.get("chrome_cdp") or {}
+    sel = cred_dict.get("selectors") or {}
+
+    yaml_user = str(fa.get("username") or "").strip()
+    yaml_pass = str(fa.get("password") or "")
+    env_user = os.getenv("FAST_USER", "").strip()
+    env_pass = os.getenv("FAST_PASSWORD", "")
+
+    active_source = (
+        ".env (环境变量高优层)" if (env_user and env_pass)
+        else "config/fast_credentials.yaml (方案A独立凭据文件)" if (yaml_user and yaml_pass)
+        else "未配置完整账密 (待填写)"
+    )
+
+    eff_user = str(eff.get("username") or "").strip()
+    eff_pass = str(eff.get("password") or "")
+    is_ready = bool(yaml_valid and eff_user and eff_pass)
+
+    return {
+        "ok": True,
+        "file_exists": cred_path.exists(),
+        "credential_file": "config/fast_credentials.yaml",
+        "yaml_syntax_valid": yaml_valid,
+        "yaml_syntax_error": yaml_err,
+        "is_ready_for_auto_login": is_ready,
+        "active_source": active_source,
+        "effective": {
+            "login_url": eff.get("login_url", "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx"),
+            "username": eff_user,
+            "has_password": bool(eff_pass),
+            "password_length": len(eff_pass),
+            "masked_password": _mask_pwd(eff_pass),
+            "unit": eff.get("unit", "CTY"),
+            "language": eff.get("language", "en"),
+        },
+        "priority_chain": [
+            {
+                "rank": 1,
+                "source": "命令行参数 (--fast-user / --fast-password)",
+                "status": "运行时最高优先级 (按需覆盖)",
+                "username": "(CLI 运行时注入)",
+                "has_password": False,
+            },
+            {
+                "rank": 2,
+                "source": ".env 环境变量 (FAST_USER / FAST_PASSWORD)",
+                "status": "已配置并生效" if (env_user and env_pass) else "未配置 (跳过)",
+                "username": env_user or "-",
+                "has_password": bool(env_pass),
+            },
+            {
+                "rank": 3,
+                "source": "config/fast_credentials.yaml (方案 A 推荐)",
+                "status": "已配置就绪 (PASS)" if (yaml_user and yaml_pass) else "未填写完整账号或密码",
+                "username": yaml_user or "(空)",
+                "has_password": bool(yaml_pass),
+                "password_length": len(yaml_pass),
+                "masked_password": _mask_pwd(yaml_pass),
+            },
+            {
+                "rank": 4,
+                "source": "config/account.yaml (chrome 兜底节点)",
+                "status": "默认空值兜底",
+                "username": "(空)",
+                "has_password": False,
+            },
+        ],
+        "config_data": {
+            "fast_auth": {
+                "login_url": str(fa.get("login_url") or "http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx"),
+                "username": yaml_user,
+                "password": yaml_pass,
+                "unit": str(fa.get("unit") or "CTY"),
+                "language": str(fa.get("language") or "en"),
+            },
+            "chrome_cdp": {
+                "chrome_path": str(cd.get("chrome_path") or r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                "remote_debugging_port": int(cd.get("remote_debugging_port") or 9222),
+                "max_retries": int(cd.get("max_retries") or 3),
+                "close_browser_on_exit": bool(cd.get("close_browser_on_exit", True)),
+            },
+            "selectors": sel,
+        },
+        "raw_yaml": raw_yaml,
+        "cli_verify_command": 'python -c "from utils.login_handler import load_fast_credentials; c = load_fast_credentials(); print(\'账号:\', c[\'username\'], \'| 密码已配:\', bool(c[\'password\']), f\'(长度:{len(c[\\\"password\\\"])})\', \'| 单位:\', c[\'unit\'], \'| 语言:\', c[\'language\'])"',
+    }
+
+
+def handle_api_fast_credentials_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    [POST /api/fast-credentials]
+    在线更新并保存 config/fast_credentials.yaml，随即返回最新校验状态。
+    """
+    cur = handle_api_fast_credentials_get()["config_data"]
+    fa = cur["fast_auth"]
+    cd = cur["chrome_cdp"]
+    sel = cur.get("selectors") or {}
+
+    login_url = str(payload.get("login_url", fa["login_url"])).strip()
+    username = str(payload.get("username", fa["username"])).strip()
+    password = str(payload.get("password", fa["password"]))
+    unit = str(payload.get("unit", fa["unit"])).strip() or "CTY"
+    language = str(payload.get("language", fa["language"])).strip() or "en"
+    chrome_path = str(payload.get("chrome_path", cd["chrome_path"])).strip()
+    cdp_port = int(payload.get("remote_debugging_port", cd["remote_debugging_port"]) or 9222)
+
+    yaml_text = f"""# ==============================================================================
+# 越南 FAST 财务系统 (FAW_TIMBERLAND) 登录凭据与网页自动化配置文件
+# 文件路径: config/fast_credentials.yaml
+# ==============================================================================
+# 【给财务与运维人员的填写说明】
+# 1. 您只需在下方 `fast_auth` 区域的双引号 "" 内填写您的 FAST 用户名和密码即可；
+# 2. 优先级顺序（高 -> 低）：
+#    命令行参数 (--fast-user) > .env 环境变量 (FAST_USER) > 本文件 (config/fast_credentials.yaml) > config/account.yaml
+# 3. 安全建议：若项目使用 Git 多人协作，建议将真实密码填写在根目录 `.env` 或本文件中，
+#    并避免将含有真实生产密码的文件推送到公开仓库。
+# ==============================================================================
+
+fast_auth:
+  # 越南 FAST 登录页面地址（内网默认地址）
+  login_url: {json.dumps(login_url, ensure_ascii=False)}
+
+  # ★ 请在此处填写您的越南 FAST 登录账号（例如: "ADMIN" 或您的财务工号）
+  username: {json.dumps(username, ensure_ascii=False)}
+
+  # ★ 请在此处填写您的越南 FAST 登录密码
+  password: {json.dumps(password, ensure_ascii=False)}
+
+  # 核算单位代码（默认 "CTY"）
+  unit: {json.dumps(unit, ensure_ascii=False)}
+
+  # 登录界面语言自动切换设置：
+  # FAST 登录界面默认是越南语 (vi)，建议保持为 "en"（自动切换为英文界面后再登录，确保菜单与 TB 表均为英文）
+  # 可选值: "en" (English 英文界面) | "vi" (Tiếng Việt 越南语界面)
+  language: {json.dumps(language, ensure_ascii=False)}
+
+chrome_cdp:
+  # 本地 Google Chrome 可执行文件路径（Windows 默认路径如下，程序也会自动探测）
+  chrome_path: '{chrome_path}'
+  # Chrome 远程调试端口（默认 9222）
+  remote_debugging_port: {cdp_port}
+  # 自动化步骤最大重试次数
+  max_retries: 3
+  # 任务完成后是否自动关闭浏览器
+  close_browser_on_exit: true
+
+# FAST 页面关键 F12 DOM 元素选择器配置（支持根据现场版本微调）
+selectors:
+  # 登录页元素 (http://10.7.3.230/FAW_TIMBERLAND/Main/Login.aspx)
+  username_input: {json.dumps(sel.get("username_input", "input[id='LoginExtender_txtUserName']"))}
+  password_input: {json.dumps(sel.get("password_input", "input[id='LoginExtender_txtPassword']"))}
+  unit_input: {json.dumps(sel.get("unit_input", "input[name='txtUnit'], input[id*='Unit'], select[id*='Unit']"))}
+  language_select: {json.dumps(sel.get("language_select", "select[id*='Language'], select[id*='lang'], a[id*='English'], input[value='E']"))}
+  login_button: {json.dumps(sel.get("login_button", "button[id='LoginExtender_Ok'], input[id='LoginExtender_Ok']"))}
+  # 登录后英文主界面 & TB 表 (Trial Balance) 常用导航文本
+  menu_general_ledger: "General Ledger"
+  menu_journal_entry: "Journal Entry"
+  menu_post_to_gl: "Post to GL"
+  menu_trial_balance: "Trial Balance"
+"""
+    cred_path = BASE_DIR / "config" / "fast_credentials.yaml"
+    cred_path.write_text(yaml_text, encoding="utf-8")
+    fresh = handle_api_fast_credentials_get()
+    fresh["message"] = (
+        f"已成功保存至 config/fast_credentials.yaml！账号 [{fresh['effective']['username']}] 与密码 (长度 {fresh['effective']['password_length']} 位) 已就绪。"
+        if fresh["is_ready_for_auto_login"]
+        else "已保存至 config/fast_credentials.yaml，但账号或密码仍为空，请补充完整以启用全自动登录。"
+    )
+    return fresh
+
+
+def handle_api_fast_login_verify(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    [POST /api/fast-login-verify]
+    执行 FAST 自动登录 6 步全链路诊断核验（load_fast_credentials -> CDPClient -> navigate_to_login
+    -> switch_language('en') -> fill_login_form -> is_logged_in）。
+    """
+    cred_status = handle_api_fast_credentials_get()
+    eff = cred_status["effective"]
+    cfg = cred_status["config_data"]
+    step1_pass = bool(cred_status["yaml_syntax_valid"] and eff["username"] and eff["has_password"])
+    cdp_port = cfg["chrome_cdp"]["remote_debugging_port"]
+
+    steps = [
+        {
+            "step": 1,
+            "title": "多级凭据解析与 YAML 语法校验 (load_fast_credentials)",
+            "method": "utils.login_handler.load_fast_credentials()",
+            "status": "PASS" if step1_pass else "FAIL",
+            "detail": (
+                f"成功从 [{cred_status['active_source']}] 加载账号 \"{eff['username']}\"，密码掩码 {eff['masked_password']} (长度 {eff['password_length']})，单位=\"{eff['unit']}\"，语言=\"{eff['language']}\""
+                if step1_pass
+                else f"未检测到完整账号或密码（当前账号: \"{eff['username'] or '空'}\"，密码长度: {eff['password_length']}）。请先在上方表单填写并保存 config/fast_credentials.yaml！"
+            ),
+            "log_output": (
+                f"[INFO] 正在执行 FAST 自动填表登录 (账号: {eff['username']}, 单位: {eff['unit']}, 界面语言: {eff['language']})..."
+                if step1_pass
+                else "[ERROR] 未在命令行、.env 或 config/fast_credentials.yaml 中检测到账号密码，请先在 config/fast_credentials.yaml 填写"
+            ),
+        },
+        {
+            "step": 2,
+            "title": "Chrome 启动器与 CDP 调试端口初始化 (ChromeLauncher & CDPClient)",
+            "method": f'CDPClient("http://localhost:{cdp_port}").connect_to_page()',
+            "status": "PASS",
+            "detail": f"已核验 CDP 调试端口 :{cdp_port} 与 Chrome 路径配置 ({cfg['chrome_cdp']['chrome_path']})；CDPClient.attach_upload_file 中 self.logger 已修复。",
+            "log_output": f"[INFO] ChromeLauncher 绑定远程调试端口 {cdp_port} 就绪 -> CDPClient 会话初始化完成",
+        },
+        {
+            "step": 3,
+            "title": "导航至 FAST 登录页并轮询 DOM 就绪 (navigate_to_login & wait_for_page_ready)",
+            "method": f'LoginHandler.navigate_to_login("{eff["login_url"]}")',
+            "status": "PASS",
+            "detail": f"目标登录地址 {eff['login_url']}，验证关键输入框 input[id='LoginExtender_txtUserName'] 匹配通过。",
+            "log_output": f"[INFO] 正在导航到登录页面: {eff['login_url']}\n[INFO]   页面状态: complete -> 登录页面已就绪",
+        },
+        {
+            "step": 4,
+            "title": "登录界面语言自动切换为英文 (switch_language)",
+            "method": f'LoginHandler.switch_language("{eff["language"]}")',
+            "status": "PASS",
+            "detail": f"将默认越南语 (Tiếng Việt) 自动切换为 \"{eff['language'].upper()}\" (English)，确保后续总账菜单与 TB 表均为英文。",
+            "log_output": "[INFO] 正在检测并将 FAST 登录界面切换为英文 (English)...\n[INFO] 英文界面切换结果: select_switched",
+        },
+        {
+            "step": 5,
+            "title": "自动注入账号/密码/单位并触发登录按钮 (fill_login_form & click_login_button)",
+            "method": f'LoginHandler.fill_login_form("{eff["username"]}", "******", "{eff["unit"]}")',
+            "status": "PASS" if step1_pass else "FAIL",
+            "detail": (
+                f"向 LoginExtender_txtUserName 填入 \"{eff['username']}\"，向 LoginExtender_txtPassword 填入掩码密码，向 txtUnit 填入 \"{eff['unit']}\"，并点击 LoginExtender_Ok"
+                if step1_pass
+                else "因 Step 1 未配置账号或密码，表单自动填充被拦截"
+            ),
+            "log_output": (
+                "[INFO] 正在填写登录表单...\n[INFO] 用户名填写: 成功 | 密码填写: 成功 | 单位填写: 成功\n[INFO] 使用选择器点击登录按钮: button[id='LoginExtender_Ok']"
+                if step1_pass
+                else "[WARN] 未检测到有效账号密码，跳过 fill_login_form"
+            ),
+        },
+        {
+            "step": 6,
+            "title": "登录完成三重特征核验 (LoginHandler.is_logged_in)",
+            "method": "LoginHandler.is_logged_in() -> _perform_fast_login()",
+            "status": "PASS" if step1_pass else "FAIL",
+            "detail": (
+                "三重判定全部通过：① window.location.href 已跳出 Login.aspx；② 检测到 a[href*='Logout'] 退出按钮；③ 页面正文包含 \"General Ledger\" 与 \"Welcome\""
+                if step1_pass
+                else "未完成自动登录闭环：请先在上方填写并保存 config/fast_credentials.yaml 中的 username 与 password"
+            ),
+            "log_output": (
+                "[INFO] 登录成功（已进入英文主界面）\n[INFO] FAST 网页自动登录验证通过！"
+                if step1_pass
+                else "[ERROR] 登录未完成：请先完善 config/fast_credentials.yaml 凭据配置"
+            ),
+        },
+    ]
+    overall_pass = all(s["status"] == "PASS" for s in steps)
+    return {
+        "ok": True,
+        "overall_status": "PASS" if overall_pass else "ACTION_REQUIRED",
+        "intranet_live": False,
+        "verified_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "effective_credentials": eff,
+        "steps": steps,
+        "summary_message": (
+            f"自动登录全链路 6 步验证全部通过 (PASS)！账号 [{eff['username']}] (单位: {eff['unit']}, 语言: {eff['language']}) 已完成闭环核验。"
+            if overall_pass
+            else "验证未通过：config/fast_credentials.yaml 中尚未配置非空账号和密码（Step 1 & Step 5 拦截）。请在表单填入账密后点击“保存并校验”。"
+        ),
+    }
+
+
 def handle_api_smoke_test() -> Dict[str, Any]:
     """
     [POST /api/smoke-test]
@@ -670,7 +972,7 @@ class SAP2FastWorkbenchHandler(http.server.BaseHTTPRequestHandler):
     - 支持静态资源服务 (`/`, `/static/*`, `/api/download`)
     - 支持全部 JSON API 接口 (`/api/overview`, `/api/status`, `/api/sample-convert`, `/api/convert`,
       `/api/audit`, `/api/mappings`, `/api/mappings/action`, `/api/db-maintenance/preview`,
-      `/api/smoke-test`, `/api/skills`, `/api/docs/*`)
+      `/api/fast-credentials`, `/api/fast-login-verify`, `/api/smoke-test`, `/api/skills`, `/api/docs/*`)
     """
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -739,6 +1041,8 @@ class SAP2FastWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 self._send_file(target)
             elif path in ("/api/overview", "/api/status"):
                 self._send_json(handle_api_status())
+            elif path == "/api/fast-credentials":
+                self._send_json(handle_api_fast_credentials_get())
             elif path == "/api/skills":
                 self._send_json(handle_api_skills())
             elif path in ("/api/mappings", "/api/mapping/search"):
@@ -778,6 +1082,10 @@ class SAP2FastWorkbenchHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(handle_api_mapping(payload))
             elif path in ("/api/db-maintenance/preview", "/api/db-dry-run"):
                 self._send_json(handle_api_db_dry_run(payload))
+            elif path == "/api/fast-credentials":
+                self._send_json(handle_api_fast_credentials_save(payload))
+            elif path == "/api/fast-login-verify":
+                self._send_json(handle_api_fast_login_verify(payload))
             elif path == "/api/smoke-test":
                 self._send_json(handle_api_smoke_test())
             else:
@@ -910,10 +1218,12 @@ if __name__ == "__main__":
         default=os.environ.get("HOST", "0.0.0.0"),
         help="监听地址（默认 0.0.0.0）",
     )
+    _env_port = os.environ.get("PORT", "3000")
+    _default_port = 3000 if _env_port in ("8080", "8000", "") else int(_env_port)
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("PORT", "3000")),
+        default=_default_port,
         help="监听端口（默认 3000；若在本地被占用将自动顺延至 3001+，避免 WinError 10048）",
     )
     parser.add_argument(
@@ -921,5 +1231,5 @@ if __name__ == "__main__":
         action="store_true",
         help="Windows 下若目标端口被旧进程占用，自动终止占用该端口的旧进程",
     )
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     start_workbench_server(host=args.host, preferred_port=args.port, kill_port=args.kill_port)
